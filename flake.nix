@@ -8,13 +8,13 @@ rec {
   outputs =
     { self, nixpkgs }:
     let
-      system = "x86_64-linux"; # Or your desired system
+      system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
     in
     {
       packages.${system}.default = pkgs.stdenv.mkDerivation {
         pname = "openergo";
-        version = "0.1.0"; # Or your desired version
+        version = "0.1.0";
 
         src = builtins.path {
           path = ./.;
