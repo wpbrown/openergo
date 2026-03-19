@@ -2,7 +2,7 @@ rec {
   description = "Ancient auto-clicker that still works.";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
   };
 
   outputs =
@@ -14,7 +14,7 @@ rec {
     {
       packages.${system}.default = pkgs.stdenv.mkDerivation {
         pname = "openergo";
-        version = "0.1.0";
+        version = "0.1.1";
 
         src = builtins.path {
           path = ./.;

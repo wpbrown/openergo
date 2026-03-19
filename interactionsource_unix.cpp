@@ -24,16 +24,34 @@ KeyCode aCode;
 KeyCode zCode;
 KeyCode xCode;
 
+// const char *xinputEventName(uint16_t type) {
+//     switch (type) {
+//     case XCB_INPUT_RAW_KEY_PRESS:    return "RawKeyPress";
+//     case XCB_INPUT_RAW_KEY_RELEASE:  return "RawKeyRelease";
+//     case XCB_INPUT_RAW_BUTTON_PRESS: return "RawButtonPress";
+//     case XCB_INPUT_RAW_BUTTON_RELEASE: return "RawButtonRelease";
+//     case XCB_INPUT_RAW_MOTION:       return "RawMotion";
+//     default:                         return "Unknown";
+//     }
+// }
+
+const int ValuatorX = 0;
+const int ValuatorY = 1;
+
 uint getPixelsMoved(xcb_input_raw_motion_event_t *event) {
     void *mask = event + 1;
     FP3232 *values = (FP3232 *)((unsigned char *)mask + (event->valuators_len * 4));
 
     uint pixels = 0;
-    for (int i = 0; i < event->valuators_len * 4 * 8; ++i) {
-        if (XIMaskIsSet(mask, i)) {
-            pixels += std::abs((values++)->integral);
-        }
+
+    if (XIMaskIsSet(mask, ValuatorX)) {
+        pixels += std::abs(values->integral);
+        ++values;
     }
+    
+    if (XIMaskIsSet(mask, ValuatorY))
+        pixels += std::abs(values->integral);
+
     return pixels;
 }
 
@@ -122,10 +140,14 @@ InteractionSource::nativeEventFilter(const QByteArray &, void *message, long *)
     u_int8_t responseType = event->response_type & ~0x80;
     if (responseType == XCB_GE_GENERIC) {
         xcb_ge_generic_event_t *geEvent = static_cast<xcb_ge_generic_event_t *>(message);
+        // qDebug() << "XCB_GE_GENERIC event:" << xinputEventName(geEvent->event_type)
+        //         << "(" << geEvent->event_type << ")";
 
         if (geEvent->event_type == XCB_INPUT_RAW_MOTION) {
             auto *motionEvent = static_cast<xcb_input_raw_motion_event_t *>(message);
             uint distance = getPixelsMoved(motionEvent);
+            if (distance == 0)
+                return false; // scroll-only motion, ignore
             _distanceSinceLastTimer += distance;
             if (_leftButtonDown)
                 _distanceSinceButtonDown += distance;
@@ -137,6 +159,7 @@ InteractionSource::nativeEventFilter(const QByteArray &, void *message, long *)
         } else if (geEvent->event_type == XCB_INPUT_RAW_BUTTON_PRESS || geEvent->event_type == XCB_INPUT_RAW_BUTTON_RELEASE) {
             auto *buttonEvent = static_cast<xcb_input_raw_button_press_event_t *>(message);
             bool pressed = geEvent->event_type == XCB_INPUT_RAW_BUTTON_PRESS;
+
             if (buttonEvent->detail == 1) {
                 _leftButtonDown = pressed;
                 if (!pressed)
@@ -148,7 +171,7 @@ InteractionSource::nativeEventFilter(const QByteArray &, void *message, long *)
                     qDebug() << "ignored autoclick";
                     return false;
                 }
-                qDebug() << "Click canceling next dwell.";
+                // qDebug() << "Click canceling next dwell.";
                 _timer.stop();
                 emit userClicked();
             }
