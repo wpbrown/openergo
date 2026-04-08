@@ -16,7 +16,12 @@
       ...
     }:
     {
-      nixosModules.openergo = import ./nix/module.nix;
+      nixosModules.openergo =
+        { pkgs, lib, ... }:
+        {
+          imports = [ ./nix/module.nix ];
+          services.openergo.package = lib.mkDefault self.packages.${pkgs.system}.openergo-server;
+        };
       nixosModules.default = self.nixosModules.openergo;
     }
     //
