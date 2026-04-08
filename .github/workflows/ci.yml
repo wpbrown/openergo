@@ -9,11 +9,16 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: "write"
+      contents: "read"
     steps:
       - uses: actions/checkout@v4
       - name: Check Inputs
         uses: DeterminateSystems/flake-checker-action@main
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Enable FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@main
       - name: Check Flake
         run: nix flake check
