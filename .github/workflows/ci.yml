@@ -20,5 +20,7 @@ jobs:
         uses: DeterminateSystems/determinate-nix-action@v3
       - name: Enable FlakeHub Cache
         uses: DeterminateSystems/flakehub-cache-action@main
+        with:
+          use-gha-cache: enabled
       - name: Check Flake
         run: nix flake check
