@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Inputs
+        uses: DeterminateSystems/flake-checker-action@main
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Check Flake
+        run: nix flake check

@@ -2,7 +2,7 @@ use crate::device_events::{ButtonState, Event};
 use bachelor::{
     broadcast::spmc::SpmcBroadcastConsumer,
     error::Closed,
-    watch::{mpmc_watch, MpmcWatchRefProducer, MpmcWatchRefSource},
+    watch::{MpmcWatchRefProducer, MpmcWatchRefSource, mpmc_watch},
 };
 use evdev::KeyCode;
 use shared::model::{ModifierUsageSnapshot, UsageSnapshot};

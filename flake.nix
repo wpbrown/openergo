@@ -1,64 +1,118 @@
 {
+  description = "openergo workspace";
+
   inputs = {
-    fenix = {
-      url = "github:nix-community/fenix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    crane.url = "github:ipetkov/crane";
+    flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs =
     {
-      fenix,
+      self,
       nixpkgs,
+      crane,
+      flake-utils,
       ...
     }:
-    let
-      system = "x86_64-linux";
-      pkgs = (import nixpkgs) {
-        inherit system;
-        overlays = [ fenix.overlays.default ];
-        config.allowUnfree = true;
-      };
-      libPath =
-        with pkgs;
-        lib.makeLibraryPath [
-          libGL
-          libxkbcommon
-          xorg.libX11
-          xorg.libXcursor
-          xorg.libXi
-          xorg.libXrandr
-          gtk3
-          glib
-          gdk-pixbuf
-          libayatana-appindicator
-          udev
-        ];
-    in
-    {
-      devShells.${system}.default = pkgs.mkShell {
-        packages = with pkgs; [
-          pkgs.graphviz
-          pkgs.bashInteractive
-          pkgs.gdb
-          pkgs.pkg-config
-          pkgs.gtk3
-          pkgs.librsvg
-          pkgs.udev
-          pkgs.python3
-        ];
+    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
+      system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+        inherit (pkgs) lib;
 
-        nativeBuildInputs = [
-          (pkgs.fenix.stable.withComponents [
-            "cargo"
-            "clippy"
-            "rust-src"
-            "rustc"
-            "rustfmt"
-          ])
-          pkgs.mold
-        ];
-        LD_LIBRARY_PATH = libPath;
-      };
-    };
+        craneLib = crane.mkLib pkgs;
+        src = craneLib.cleanCargoSource ./.;
+
+        commonArgs = {
+          inherit src;
+          strictDeps = true;
+
+          nativeBuildInputs = [
+            pkgs.pkg-config
+          ];
+
+          buildInputs = [
+            pkgs.udev
+          ];
+        };
+
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        individualCrateArgs = commonArgs // {
+          inherit cargoArtifacts;
+          inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
+          doCheck = false;
+        };
+
+        fileSetForCrate =
+          crate:
+          lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./.cargo
+              ./Cargo.toml
+              ./Cargo.lock
+              (craneLib.fileset.commonCargoSources ./crates/shared)
+              (craneLib.fileset.commonCargoSources crate)
+            ];
+          };
+
+        openergo-server = craneLib.buildPackage (
+          individualCrateArgs
+          // {
+            pname = "openergo-server";
+            cargoExtraArgs = "-p openergo-server";
+            src = fileSetForCrate ./crates/server;
+          }
+        );
+
+        openergo-client = craneLib.buildPackage (
+          individualCrateArgs
+          // {
+            pname = "openergo-client";
+            cargoExtraArgs = "-p openergo-client";
+            src = fileSetForCrate ./crates/client;
+          }
+        );
+      in
+      {
+        checks = {
+          inherit openergo-server openergo-client;
+
+          workspace-clippy = craneLib.cargoClippy (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+            }
+          );
+
+          workspace-fmt = craneLib.cargoFmt {
+            inherit src;
+          };
+        };
+
+        packages = {
+          inherit openergo-server openergo-client;
+          default = openergo-server;
+        };
+
+        apps.openergo-server = flake-utils.lib.mkApp {
+          drv = openergo-server;
+        } // { meta.description = "OpenErgo server"; };
+
+        apps.openergo-client = flake-utils.lib.mkApp {
+          drv = openergo-client;
+        } // { meta.description = "OpenErgo client"; };
+
+        devShells.default = craneLib.devShell {
+          checks = self.checks.${system};
+
+          packages = [
+            pkgs.pkg-config
+          ];
+        };
+      }
+    );
 }

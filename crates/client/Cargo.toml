@@ -1,0 +1,6 @@
+[package]
+name = "openergo-client"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
