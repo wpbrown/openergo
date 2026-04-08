@@ -1,24 +1,38 @@
 use rootcause::prelude::*;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub socket: Option<SocketConfig>,
+    pub dwell_click: Option<DwellClickConfig>,
     pub devices: Option<DevicesConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SocketConfig {
-    /// User (name or UID) to own the socket. Sets the socket path to
-    /// `/run/user/{uid}/openergo.sock` and chowns accordingly.
+    /// Path to the Unix domain socket. Defaults to `/run/openergo.sock`.
+    pub path: Option<PathBuf>,
+    /// User (name or UID) to own the socket at the configured path.
     pub user: Option<String>,
-    /// Group (name or GID) to own the socket. If set without `user`, the
-    /// socket is created at `/run/openergo.sock` with the group set. If set
+    /// Group (name or GID) to own the socket at the configured path. If set
     /// with `user`, overrides the user's primary group.
     pub group: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DwellClickConfig {
+    /// Whether clients are allowed to configure dwell click behavior.
+    pub allow: Option<bool>,
+}
+
+impl DwellClickConfig {
+    pub fn allow(&self) -> bool {
+        self.allow.unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -102,25 +116,48 @@ impl Config {
             validate_matchers(exclude, "exclude")?;
         }
 
-        // auto_detect=false with only exclude and no include is nonsensical.
-        if !devices.auto_detect()
-            && devices.include.as_ref().is_none_or(|v| v.is_empty())
-            && devices.exclude.as_ref().is_some_and(|v| !v.is_empty())
-        {
+        if !devices.auto_detect() && devices.include.as_ref().is_none_or(|v| v.is_empty()) {
             bail!(
-                "auto_detect is false with exclude rules but no include rules; \
+                "auto_detect is false and no include rules are set; \
                  no devices would be monitored"
             );
         }
 
-        // auto_detect=false with no include rules: warn (not an error, but useless).
-        if !devices.auto_detect() && devices.include.as_ref().is_none_or(|v| v.is_empty()) {
-            log::warn!(
-                "config: auto_detect is false and no include rules are set; \
-                 no devices will be monitored"
-            );
-        }
-
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dwell_click_allow_parses() {
+        let config: Config = toml::from_str(
+            r#"
+            [dwell_click]
+            allow = true
+            "#,
+        )
+        .expect("config should parse");
+
+        assert!(
+            config
+                .dwell_click
+                .as_ref()
+                .is_some_and(DwellClickConfig::allow)
+        );
+    }
+
+    #[test]
+    fn dwell_click_allow_defaults_to_false() {
+        let config: Config = toml::from_str("").expect("empty config should parse");
+
+        assert!(
+            !config
+                .dwell_click
+                .as_ref()
+                .is_some_and(DwellClickConfig::allow)
+        );
     }
 }
