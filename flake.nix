@@ -112,7 +112,7 @@
             drv = openergo-server;
           }
           // {
-            meta.description = "OpenErgo server";
+            meta.description = "Openergo server";
           };
 
         apps.openergo-client =
@@ -120,7 +120,7 @@
             drv = openergo-client;
           }
           // {
-            meta.description = "OpenErgo client";
+            meta.description = "Openergo client";
           };
 
         devShells.default = craneLib.devShell {

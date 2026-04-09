@@ -96,7 +96,7 @@ let
 in
 {
   options.services.openergo = {
-    enable = mkEnableOption "OpenErgo input device monitoring service";
+    enable = mkEnableOption "Openergo input device monitoring service";
 
     package = mkOption {
       type = types.package;
@@ -154,6 +154,13 @@ in
       ++ matcherAssertions "exclude" cfg.devices.exclude
       ++ [
         {
+          assertion = !cfg.dwellClick.allow || config.hardware.uinput.enable;
+          message = ''
+            services.openergo.dwellClick.allow requires hardware.uinput.enable = true;
+            the uinput kernel module and group are needed for virtual device support
+          '';
+        }
+        {
           assertion = cfg.devices.autoDetect || hasIncludeRules;
           message = ''
             services.openergo.devices.autoDetect is false and no include rules are set;
@@ -163,7 +170,7 @@ in
       ];
 
     systemd.sockets.openergo = {
-      description = "OpenErgo IPC socket";
+      description = "Openergo IPC socket";
       wantedBy = [ "sockets.target" ];
 
       socketConfig = {
@@ -180,7 +187,7 @@ in
     };
 
     systemd.services.openergo = {
-      description = "OpenErgo input device monitoring service";
+      description = "Openergo input device monitoring service";
       wantedBy = [ "multi-user.target" ];
       requires = [ "openergo.socket" ];
       after = [
@@ -192,8 +199,8 @@ in
         DynamicUser = true;
         SupplementaryGroups = [
           "input"
-          "uinput"
-        ];
+        ]
+        ++ lib.optionals cfg.dwellClick.allow [ "uinput" ];
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ProtectHome = "read-only";
