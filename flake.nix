@@ -24,8 +24,7 @@
         };
       nixosModules.default = self.nixosModules.openergo;
     }
-    //
-    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
+    // flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -108,13 +107,21 @@
           default = openergo-server;
         };
 
-        apps.openergo-server = flake-utils.lib.mkApp {
-          drv = openergo-server;
-        } // { meta.description = "OpenErgo server"; };
+        apps.openergo-server =
+          flake-utils.lib.mkApp {
+            drv = openergo-server;
+          }
+          // {
+            meta.description = "OpenErgo server";
+          };
 
-        apps.openergo-client = flake-utils.lib.mkApp {
-          drv = openergo-client;
-        } // { meta.description = "OpenErgo client"; };
+        apps.openergo-client =
+          flake-utils.lib.mkApp {
+            drv = openergo-client;
+          }
+          // {
+            meta.description = "OpenErgo client";
+          };
 
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};

@@ -53,7 +53,14 @@ let
   deviceMatcherToToml =
     m:
     filterNulls {
-      inherit (m) path model model_id vendor_id serial bus;
+      inherit (m)
+        path
+        model
+        model_id
+        vendor_id
+        serial
+        bus
+        ;
     };
 
   deviceMatcherIsEmpty = m: deviceMatcherToToml m == { };
@@ -74,22 +81,18 @@ let
           allow = cfg.dwellClick.allow;
         };
       };
-      devicesSection = lib.optionalAttrs (
-        !cfg.devices.autoDetect
-        || cfg.devices.include != [ ]
-        || cfg.devices.exclude != [ ]
-      ) {
-        devices = filterNulls {
-          auto_detect = cfg.devices.autoDetect;
-          include = if cfg.devices.include == [ ] then null else map deviceMatcherToToml cfg.devices.include;
-          exclude = if cfg.devices.exclude == [ ] then null else map deviceMatcherToToml cfg.devices.exclude;
-        };
-      };
+      devicesSection =
+        lib.optionalAttrs
+          (!cfg.devices.autoDetect || cfg.devices.include != [ ] || cfg.devices.exclude != [ ])
+          {
+            devices = filterNulls {
+              auto_detect = cfg.devices.autoDetect;
+              include = if cfg.devices.include == [ ] then null else map deviceMatcherToToml cfg.devices.include;
+              exclude = if cfg.devices.exclude == [ ] then null else map deviceMatcherToToml cfg.devices.exclude;
+            };
+          };
     in
-    (pkgs.formats.toml { }).generate "openergo.toml" (
-      dwellClickSection
-      // devicesSection
-    );
+    (pkgs.formats.toml { }).generate "openergo.toml" (dwellClickSection // devicesSection);
 in
 {
   options.services.openergo = {
@@ -180,11 +183,17 @@ in
       description = "OpenErgo input device monitoring service";
       wantedBy = [ "multi-user.target" ];
       requires = [ "openergo.socket" ];
-      after = [ "openergo.socket" "systemd-udevd.service" ];
+      after = [
+        "openergo.socket"
+        "systemd-udevd.service"
+      ];
 
       serviceConfig = {
         DynamicUser = true;
-        SupplementaryGroups = [ "input" "uinput" ];
+        SupplementaryGroups = [
+          "input"
+          "uinput"
+        ];
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ProtectHome = "read-only";
@@ -193,7 +202,10 @@ in
         ProtectKernelModules = true;
         ProtectControlGroups = true;
         RestrictSUIDSGID = true;
-        RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_NETLINK"
+        ];
         IPAddressDeny = "any";
         ExecStart = "${cfg.package}/bin/openergo-server --config ${configToml}";
         Restart = "on-failure";
