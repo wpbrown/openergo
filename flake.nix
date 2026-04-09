@@ -73,6 +73,11 @@
             pname = "openergo-server";
             cargoExtraArgs = "-p openergo-server";
             src = fileSetForCrate ./crates/server;
+            meta = with lib; {
+              description = "Openergo server";
+              license = licenses.gpl3Only;
+              platforms = platforms.linux;
+            };
           }
         );
 
@@ -82,6 +87,11 @@
             pname = "openergo-client";
             cargoExtraArgs = "-p openergo-client";
             src = fileSetForCrate ./crates/client;
+            meta = with lib; {
+              description = "Openergo client";
+              license = licenses.gpl3Only;
+              platforms = platforms.linux;
+            };
           }
         );
       in
@@ -110,17 +120,11 @@
         apps.openergo-server =
           flake-utils.lib.mkApp {
             drv = openergo-server;
-          }
-          // {
-            meta.description = "Openergo server";
           };
 
         apps.openergo-client =
           flake-utils.lib.mkApp {
             drv = openergo-client;
-          }
-          // {
-            meta.description = "Openergo client";
           };
 
         devShells.default = craneLib.devShell {

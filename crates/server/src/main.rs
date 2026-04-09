@@ -34,6 +34,7 @@ struct RuntimeConfig {
     socket_path: PathBuf,
     socket_user: Option<String>,
     socket_group: Option<String>,
+    dwell_click_enabled: bool,
 }
 
 fn main() {
@@ -62,18 +63,23 @@ fn startup(args: Args) -> Result<(), Report> {
             runtime_config.socket_group.as_deref(),
         )
         .context("Failed to create socket listener")?;
-        run(listener, runtime_config.device_filter).await
+        run(
+            listener,
+            runtime_config.device_filter,
+            runtime_config.dwell_click_enabled,
+        )
+        .await
     })
 }
 
 fn runtime_config_from_sources(args: Args, file_config: Option<config::Config>) -> RuntimeConfig {
-    let (socket, devices) = match file_config {
+    let (socket, devices, dwell_click_enabled) = match file_config {
         Some(config::Config {
             socket,
             devices,
-            dwell_click: _,
-        }) => (socket, devices),
-        None => (None, None),
+            dwell_click,
+        }) => (socket, devices, dwell_click.map_or(false, |dc| dc.allow())),
+        None => (None, None, false),
     };
 
     let device_filter = device_filter_from_config(devices);
@@ -92,13 +98,18 @@ fn runtime_config_from_sources(args: Args, file_config: Option<config::Config>) 
         socket_path,
         socket_user,
         socket_group: cfg_group,
+        dwell_click_enabled,
     }
 }
 
 const EVENT_BROADCAST_CAPACITY: NonZeroUsize =
     NonZeroUsize::new(32).expect("broadcast capacity must be non-zero");
 
-async fn run(listener: UnixListener, device_filter: DeviceFilter) -> Result<(), Report> {
+async fn run(
+    listener: UnixListener,
+    device_filter: DeviceFilter,
+    dwell_click_enabled: bool,
+) -> Result<(), Report> {
     // Device Events
     let (device_events, device_events_driver) = device_events::create(device_filter);
     let device_events_task = spawn_local(device_events_driver.run());
@@ -106,10 +117,14 @@ async fn run(listener: UnixListener, device_filter: DeviceFilter) -> Result<(), 
     let (device_events_sink, device_events_source) = broadcast(EVENT_BROADCAST_CAPACITY);
     spawn_local(device_events.map(Ok).forward(device_events_sink));
 
-    // Dwell Click
-    let (dwell_controller, click_events, dwell_driver) =
-        dwell_click::create(device_events_source.subscribe());
-    let dwell_task = spawn_local(dwell_driver.run());
+    // Dwell Click (optional)
+    let (dwell_controller, click_events, dwell_task) = if dwell_click_enabled {
+        let (controller, events, driver) = dwell_click::create(device_events_source.subscribe());
+        let task = spawn_local(driver.run());
+        (Some(controller), Some(events), Some(task))
+    } else {
+        (None, None, None)
+    };
 
     // Usage Events
     let (usage_events, usage_driver) = usage::create(
@@ -122,12 +137,17 @@ async fn run(listener: UnixListener, device_filter: DeviceFilter) -> Result<(), 
     let (server_events, ipc_server) = server::create(listener, usage_events, click_events);
     spawn_local(ipc_server.run());
 
-    // Run until commands channel closes or dwell driver fails
-    spawn_local(forward_commands(server_events, dwell_controller));
+    // Forward dwell click commands if enabled
+    if let Some(dwell_controller) = dwell_controller {
+        spawn_local(forward_commands(server_events, dwell_controller));
+    }
 
-    match select(device_events_task, dwell_task).await {
-        Either::Left((result, _)) => result.expect("task paniced"),
-        Either::Right((result, _)) => result.expect("task paniced"),
+    match dwell_task {
+        Some(dwell_task) => match select(device_events_task, dwell_task).await {
+            Either::Left((result, _)) => result.expect("task panicked"),
+            Either::Right((result, _)) => result.expect("task panicked"),
+        },
+        None => device_events_task.await.expect("task panicked"),
     }
 }
 

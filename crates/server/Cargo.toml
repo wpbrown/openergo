@@ -2,6 +2,7 @@
 name = "openergo-server"
 version.workspace = true
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 bachelor = { version = "0.0.7", features = ["stream", "sink"] }
