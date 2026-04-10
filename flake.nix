@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     crane.url = "github:ipetkov/crane";
+    fenix.url = "github:nix-community/fenix";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -12,6 +13,7 @@
       self,
       nixpkgs,
       crane,
+      fenix,
       flake-utils,
       ...
     }:
@@ -30,7 +32,8 @@
         pkgs = nixpkgs.legacyPackages.${system};
         inherit (pkgs) lib;
 
-        craneLib = crane.mkLib pkgs;
+        rustToolchain = fenix.packages.${system}.stable.defaultToolchain;
+        craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
         src = craneLib.cleanCargoSource ./.;
 
         commonArgs = {
@@ -117,15 +120,13 @@
           default = openergo-server;
         };
 
-        apps.openergo-server =
-          flake-utils.lib.mkApp {
-            drv = openergo-server;
-          };
+        apps.openergo-server = flake-utils.lib.mkApp {
+          drv = openergo-server;
+        };
 
-        apps.openergo-client =
-          flake-utils.lib.mkApp {
-            drv = openergo-client;
-          };
+        apps.openergo-client = flake-utils.lib.mkApp {
+          drv = openergo-client;
+        };
 
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};
