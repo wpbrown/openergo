@@ -134,6 +134,9 @@
           packages = [
             pkgs.pkg-config
           ];
+
+          # for rust-analyzer
+          RUST_SRC_PATH = "${fenix.packages.${system}.stable.rust-src}/lib/rustlib/src/rust/library";
         };
       }
     );
