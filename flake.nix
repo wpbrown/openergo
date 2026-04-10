@@ -15,7 +15,16 @@
       flake-utils,
       ...
     }:
-    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
+    {
+      nixosModules.openergo =
+        { pkgs, lib, ... }:
+        {
+          imports = [ ./nix/module.nix ];
+          services.openergo.package = lib.mkDefault self.packages.${pkgs.system}.openergo-server;
+        };
+      nixosModules.default = self.nixosModules.openergo;
+    }
+    // flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -64,6 +73,11 @@
             pname = "openergo-server";
             cargoExtraArgs = "-p openergo-server";
             src = fileSetForCrate ./crates/server;
+            meta = with lib; {
+              description = "Openergo server";
+              license = licenses.gpl3Only;
+              platforms = platforms.linux;
+            };
           }
         );
 
@@ -73,6 +87,11 @@
             pname = "openergo-client";
             cargoExtraArgs = "-p openergo-client";
             src = fileSetForCrate ./crates/client;
+            meta = with lib; {
+              description = "Openergo client";
+              license = licenses.gpl3Only;
+              platforms = platforms.linux;
+            };
           }
         );
       in
@@ -98,13 +117,15 @@
           default = openergo-server;
         };
 
-        apps.openergo-server = flake-utils.lib.mkApp {
-          drv = openergo-server;
-        } // { meta.description = "OpenErgo server"; };
+        apps.openergo-server =
+          flake-utils.lib.mkApp {
+            drv = openergo-server;
+          };
 
-        apps.openergo-client = flake-utils.lib.mkApp {
-          drv = openergo-client;
-        } // { meta.description = "OpenErgo client"; };
+        apps.openergo-client =
+          flake-utils.lib.mkApp {
+            drv = openergo-client;
+          };
 
         devShells.default = craneLib.devShell {
           checks = self.checks.${system};

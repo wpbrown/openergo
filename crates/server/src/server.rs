@@ -29,7 +29,7 @@ pub enum ClientCommand {
 pub fn create(
     listener: UnixListener,
     usage_source: MpmcWatchRefSource<UsageSnapshot>,
-    click_events: MpmcLatchedSignalSource,
+    click_events: Option<MpmcLatchedSignalSource>,
 ) -> (MpscChannelConsumer<ClientCommand>, Server) {
     let (cmd_tx, cmd_rx) = mpsc::channel(NonZeroUsize::new(32).unwrap());
 
@@ -47,7 +47,7 @@ pub fn create(
 pub struct Server {
     listener: UnixListener,
     usage_source: MpmcWatchRefSource<UsageSnapshot>,
-    click_events: MpmcLatchedSignalSource,
+    click_events: Option<MpmcLatchedSignalSource>,
     cmd_tx: MpscChannelProducer<ClientCommand>,
 }
 
@@ -58,7 +58,7 @@ impl Server {
             match self.listener.accept().await {
                 Ok((stream, _)) => {
                     let usage_rx = self.usage_source.subscribe_forward();
-                    let click_rx = self.click_events.subscribe_forward();
+                    let click_rx = self.click_events.as_ref().map(|ce| ce.subscribe_forward());
                     let cmd_tx = self.cmd_tx.clone();
                     tokio::task::spawn_local(async move {
                         handle_client(stream, usage_rx, click_rx, cmd_tx).await;
@@ -82,26 +82,35 @@ enum ClientLoopEvent {
 
 async fn wait_client_event(
     usage_rx: &mut MpmcWatchRefConsumer<UsageSnapshot>,
-    click_rx: &mut bachelor::signal::mpmc_latched::MpmcLatchedSignalConsumer,
+    click_rx: &mut Option<bachelor::signal::mpmc_latched::MpmcLatchedSignalConsumer>,
     framed: &mut Framed<UnixStream, PostcardCodec<Command, ServerMessage>>,
 ) -> ClientLoopEvent {
     let usage_changed_fut = usage_rx.changed();
     pin_mut!(usage_changed_fut);
 
-    match select(select(usage_changed_fut, click_rx.observe()), framed.next()).await {
-        Either::Left((inner, _)) => match inner {
+    let base_event = async {
+        match select(usage_changed_fut, framed.next()).await {
             Either::Left((Ok(()), _)) => ClientLoopEvent::UsageChanged,
             Either::Left((Err(_), _)) => ClientLoopEvent::UsageChannelClosed,
+            Either::Right((result, _)) => ClientLoopEvent::Command(result),
+        }
+    };
+
+    if let Some(click_rx) = click_rx.as_mut() {
+        pin_mut!(base_event);
+        match select(base_event, click_rx.observe()).await {
+            Either::Left((event, _)) => event,
             Either::Right(((), _)) => ClientLoopEvent::Click,
-        },
-        Either::Right((result, _)) => ClientLoopEvent::Command(result),
+        }
+    } else {
+        base_event.await
     }
 }
 
 async fn handle_client(
     stream: UnixStream,
     mut usage_rx: MpmcWatchRefConsumer<UsageSnapshot>,
-    mut click_rx: bachelor::signal::mpmc_latched::MpmcLatchedSignalConsumer,
+    mut click_rx: Option<bachelor::signal::mpmc_latched::MpmcLatchedSignalConsumer>,
     cmd_tx: MpscChannelProducer<ClientCommand>,
 ) {
     use jiff::Timestamp;
