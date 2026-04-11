@@ -5,3 +5,12 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
+env_logger = "0.11"
+futures = "0.3"
+log = "0.4"
+rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
+rootcause = "0.12"
+shared = { path = "../shared" }
+tokio = { version = "1", features = ["rt", "net", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+users = "0.11"

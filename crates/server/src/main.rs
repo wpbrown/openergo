@@ -186,6 +186,7 @@ fn device_filter_from_config(devices: Option<config::DevicesConfig>) -> DeviceFi
             .into_iter()
             .map(|m| DeviceMatcher {
                 path: m.path.map(PathBuf::from),
+                name: m.name,
                 model: m.model,
                 model_id: m.model_id,
                 vendor_id: m.vendor_id,

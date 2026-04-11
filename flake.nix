@@ -45,6 +45,7 @@
           ];
 
           buildInputs = [
+            pkgs.alsa-lib
             pkgs.udev
           ];
         };
@@ -134,6 +135,8 @@
           packages = [
             pkgs.pkg-config
           ];
+
+          LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.alsa-lib pkgs.udev ];
 
           # for rust-analyzer
           RUST_SRC_PATH = "${fenix.packages.${system}.stable.rust-src}/lib/rustlib/src/rust/library";

@@ -61,6 +61,8 @@ impl DevicesConfig {
 pub struct DeviceMatcher {
     /// Device path — matched against DEVNAME and DEVLINKS.
     pub path: Option<String>,
+    /// Matched against the evdev device name (udev `NAME` property).
+    pub name: Option<String>,
     /// Matched against udev `ID_MODEL`.
     pub model: Option<String>,
     /// Matched against udev `ID_MODEL_ID`.
@@ -76,6 +78,7 @@ pub struct DeviceMatcher {
 impl DeviceMatcher {
     fn is_empty(&self) -> bool {
         self.path.is_none()
+            && self.name.is_none()
             && self.model.is_none()
             && self.model_id.is_none()
             && self.vendor_id.is_none()

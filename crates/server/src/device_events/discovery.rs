@@ -32,7 +32,16 @@ impl DeviceFilter {
 
     /// Returns `true` if the device should be monitored.
     pub fn matches(&self, device: &udev::Device) -> bool {
-        if device.devnode().is_none() {
+        log::debug!(
+            "Evaluating device: {} node: {:?}",
+            device.syspath().display(),
+            device.devnode().map(|n| n.display())
+        );
+        if device.devnode().is_none_or(|n| {
+            !n.file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f.starts_with("event"))
+        }) {
             return false;
         }
         let base = self.auto_detect && is_input_device(device);
@@ -68,6 +77,7 @@ fn has_property(device: &udev::Device, name: &str) -> bool {
 /// match (AND logic).
 pub struct DeviceMatcher {
     pub path: Option<PathBuf>,
+    pub name: Option<String>,
     pub model: Option<String>,
     pub model_id: Option<String>,
     pub vendor_id: Option<String>,
@@ -80,6 +90,11 @@ pub struct DeviceMatcher {
 fn matcher_matches(matcher: &DeviceMatcher, device: &udev::Device) -> bool {
     if let Some(path) = &matcher.path
         && !path_matches(path, device)
+    {
+        return false;
+    }
+    if let Some(name) = &matcher.name
+        && !name_matches(device, name)
     {
         return false;
     }
@@ -125,4 +140,18 @@ fn path_matches(path: &Path, device: &udev::Device) -> bool {
 
 fn property_eq(device: &udev::Device, name: &str, expected: &str) -> bool {
     device.property_value(name).is_some_and(|v| v == expected)
+}
+
+/// The NAME property lives on the parent `inputX` device, not on the `eventX`
+/// device itself, so we check both.
+fn name_matches(device: &udev::Device, expected: &str) -> bool {
+    if property_eq(device, "NAME", expected) {
+        return true;
+    }
+    let parent = device.parent();
+    parent
+        .as_ref()
+        .and_then(|p| p.property_value("NAME"))
+        .and_then(|n| n.to_str())
+        .is_some_and(|v| v.trim_matches('"') == expected)
 }

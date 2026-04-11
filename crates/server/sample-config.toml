@@ -1,6 +1,0 @@
-# Sample config: disable auto-detect and include only the Chicony USB Keyboard
-[devices]
-auto_detect = false
-
-[[devices.include]]
-serial = "Chicony_USB_Keyboard"
