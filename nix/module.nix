@@ -109,12 +109,24 @@ in
       description = "The openergo-server package to use.";
     };
 
+    logLevel = mkOption {
+      type = types.str;
+      default = "info";
+      description = "Value of the `RUST_LOG` environment variable for the server service.";
+    };
+
     client = {
       enable = mkEnableOption "Openergo client user service";
 
       package = mkOption {
         type = types.package;
         description = "The openergo-client package to use.";
+      };
+
+      logLevel = mkOption {
+        type = types.str;
+        default = "info";
+        description = "Value of the `RUST_LOG` environment variable for the client service.";
       };
 
       users = mkOption {
@@ -202,6 +214,8 @@ in
         ConditionUser = map (u: "|${u}") cfg.client.users;
       };
 
+      environment.RUST_LOG = cfg.client.logLevel;
+
       serviceConfig = {
         ExecStart = "${cfg.client.package}/bin/openergo-client";
         Restart = "on-failure";
@@ -258,6 +272,8 @@ in
         Restart = "on-failure";
         RestartSec = 5;
       };
+
+      environment.RUST_LOG = cfg.logLevel;
     };
   };
 }
