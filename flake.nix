@@ -22,8 +22,8 @@
         { pkgs, lib, ... }:
         {
           imports = [ ./nix/module.nix ];
-          services.openergo.package = lib.mkDefault self.packages.${pkgs.system}.openergo-server;
-          services.openergo.client.package = lib.mkDefault self.packages.${pkgs.system}.openergo-client;
+          services.openergo.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.openergo-server;
+          services.openergo.client.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.openergo-client;
         };
       nixosModules.default = self.nixosModules.openergo;
     }
