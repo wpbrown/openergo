@@ -78,7 +78,7 @@ fn runtime_config_from_sources(args: Args, file_config: Option<config::Config>) 
             socket,
             devices,
             dwell_click,
-        }) => (socket, devices, dwell_click.map_or(false, |dc| dc.allow())),
+        }) => (socket, devices, dwell_click.is_some_and(|dc| dc.allow())),
         None => (None, None, false),
     };
 
