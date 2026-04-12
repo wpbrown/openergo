@@ -49,6 +49,7 @@
           buildInputs = [
             pkgs.alsa-lib
             pkgs.udev
+            pkgs.stdenv.cc.cc.lib
           ];
         };
 
