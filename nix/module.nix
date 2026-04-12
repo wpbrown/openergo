@@ -20,6 +20,11 @@ let
         default = null;
         description = "Device path — matched against DEVNAME and DEVLINKS.";
       };
+      name = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Matched against the evdev device name (udev `NAME` property).";
+      };
       model = mkOption {
         type = types.nullOr types.str;
         default = null;
@@ -55,6 +60,7 @@ let
     filterNulls {
       inherit (m)
         path
+        name
         model
         model_id
         vendor_id
@@ -101,6 +107,24 @@ in
     package = mkOption {
       type = types.package;
       description = "The openergo-server package to use.";
+    };
+
+    client = {
+      enable = mkEnableOption "Openergo client user service";
+
+      package = mkOption {
+        type = types.package;
+        description = "The openergo-client package to use.";
+      };
+
+      users = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Users for whom the openergo-client user service will be enabled.
+          The service starts automatically at login for each listed user.
+        '';
+      };
     };
 
     socket = {
@@ -168,6 +192,22 @@ in
           '';
         }
       ];
+
+    systemd.user.services.openergo-client = mkIf cfg.client.enable {
+      description = "Openergo client";
+      wantedBy = [ "default.target" ];
+      after = [ "graphical-session.target" ];
+
+      unitConfig = lib.optionalAttrs (cfg.client.users != [ ]) {
+        ConditionUser = map (u: "|${u}") cfg.client.users;
+      };
+
+      serviceConfig = {
+        ExecStart = "${cfg.client.package}/bin/openergo-client";
+        Restart = "on-failure";
+        RestartSec = 5;
+      };
+    };
 
     systemd.sockets.openergo = {
       description = "Openergo IPC socket";

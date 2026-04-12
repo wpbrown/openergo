@@ -23,6 +23,7 @@
         {
           imports = [ ./nix/module.nix ];
           services.openergo.package = lib.mkDefault self.packages.${pkgs.system}.openergo-server;
+          services.openergo.client.package = lib.mkDefault self.packages.${pkgs.system}.openergo-client;
         };
       nixosModules.default = self.nixosModules.openergo;
     }
