@@ -43,6 +43,7 @@
 
           nativeBuildInputs = [
             pkgs.pkg-config
+            # for udev
             pkgs.autoPatchelfHook
           ];
 
