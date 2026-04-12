@@ -61,15 +61,19 @@
 
         fileSetForCrate =
           crate:
+          lib.fileset.unions [
+            ./.cargo
+            ./Cargo.toml
+            ./Cargo.lock
+            (craneLib.fileset.commonCargoSources ./crates/shared)
+            (craneLib.fileset.commonCargoSources crate)
+          ];
+
+        srcForFileSet =
+          fileset:
           lib.fileset.toSource {
             root = ./.;
-            fileset = lib.fileset.unions [
-              ./.cargo
-              ./Cargo.toml
-              ./Cargo.lock
-              (craneLib.fileset.commonCargoSources ./crates/shared)
-              (craneLib.fileset.commonCargoSources crate)
-            ];
+            inherit fileset;
           };
 
         openergo-server = craneLib.buildPackage (
@@ -77,7 +81,7 @@
           // {
             pname = "openergo-server";
             cargoExtraArgs = "-p openergo-server";
-            src = fileSetForCrate ./crates/server;
+            src = srcForFileSet (fileSetForCrate ./crates/server);
             meta = with lib; {
               description = "Openergo server";
               license = licenses.gpl3Only;
@@ -91,7 +95,10 @@
           // {
             pname = "openergo-client";
             cargoExtraArgs = "-p openergo-client";
-            src = fileSetForCrate ./crates/client;
+            src = srcForFileSet (lib.fileset.union
+              (fileSetForCrate ./crates/client)
+              ./crates/client/assets
+            );
             meta = with lib; {
               description = "Openergo client";
               license = licenses.gpl3Only;
