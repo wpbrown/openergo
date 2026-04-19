@@ -1,7 +1,30 @@
 use crate::codec::PostcardCodec;
+use crate::model::UsageDelta;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageIncrement {
+    #[serde(flatten)]
+    pub delta: UsageDelta,
+    pub start: Timestamp,
+    pub end: Timestamp,
+}
+
+impl UsageIncrement {
+    pub fn new(delta: UsageDelta, start: Timestamp, end: Timestamp) -> Self {
+        Self { delta, start, end }
+    }
+
+    /// Calculate the duration of this increment's time window.
+    pub fn duration(&self) -> Duration {
+        self.end
+            .duration_since(self.start)
+            .try_into()
+            .unwrap_or_default()
+    }
+}
 
 pub type ClientCodec = PostcardCodec<ServerMessage, Command>;
 pub type ServerCodec = PostcardCodec<Command, ServerMessage>;
@@ -17,35 +40,6 @@ pub enum Command {
 pub enum ServerMessage {
     NewUsage(Box<UsageIncrement>),
     Click,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageIncrement {
-    pub click_count: u64,
-    pub drag_duration: Duration,
-    pub key_count: u64,
-    pub left_modifier_duration: ModifierUsageIncrement,
-    pub right_modifier_duration: ModifierUsageIncrement,
-    pub start: Timestamp,
-    pub end: Timestamp,
-}
-
-impl UsageIncrement {
-    /// Calculate the duration of this increment's time window.
-    pub fn duration(&self) -> Duration {
-        self.end
-            .duration_since(self.start)
-            .try_into()
-            .unwrap_or_default()
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct ModifierUsageIncrement {
-    pub shift: Duration,
-    pub ctrl: Duration,
-    pub alt: Duration,
-    pub meta: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

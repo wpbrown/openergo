@@ -12,7 +12,7 @@ use futures::pin_mut;
 use futures::{SinkExt, StreamExt};
 use shared::codec::PostcardCodec;
 use shared::model::UsageSnapshot;
-use shared::protocol::{Command, DwellServerConfig, ServerMessage};
+use shared::protocol::{Command, DwellServerConfig, ServerMessage, UsageIncrement};
 use std::io;
 use std::num::NonZeroUsize;
 use tokio::net::{UnixListener, UnixStream};
@@ -129,7 +129,7 @@ async fn handle_client(
 
                 let current_usage = usage_rx.get();
                 let increment =
-                    current_usage.saturating_usage_since(&previous_usage, last_end, now);
+                    UsageIncrement::new(current_usage.saturating_delta(&previous_usage), last_end, now);
                 last_end = now;
                 previous_usage = current_usage;
                 let msg = ServerMessage::NewUsage(Box::new(increment));

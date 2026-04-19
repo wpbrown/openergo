@@ -5,11 +5,17 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
+bachelor = { version = "0.0.7", features = ["stream", "sink"] }
 env_logger = "0.11"
 futures = "0.3"
+jiff = "0.2"
 log = "0.4"
+opentelemetry = { version = "0.31", features = ["metrics", "futures"], default-features = false }
+opentelemetry_sdk = { version = "0.31", features = ["metrics", "experimental_metrics_periodicreader_with_async_runtime", "rt-tokio"], default-features = false }
+opentelemetry-otlp = { version = "0.31", features = ["metrics", "http-proto", "reqwest-client", "zstd-http"], default-features = false }
 rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
 rootcause = "0.12"
+serde = { version = "1", features = ["derive"] }
 shared = { path = "../shared" }
 tokio = { version = "1", features = ["rt", "net", "time"] }
 tokio-util = { version = "0.7", features = ["codec"] }
