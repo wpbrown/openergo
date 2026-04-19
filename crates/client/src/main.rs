@@ -61,10 +61,8 @@ async fn run() -> Result<(), Report> {
     spawn_local(rest_driver);
 
     // All-time usage driver
-    let (_all_usage_source, all_usage_driver) = usage::all::create(
-        usage_source.subscribe(),
-        Default::default(),
-    );
+    let (_all_usage_source, all_usage_driver) =
+        usage::all::create(usage_source.subscribe(), Default::default());
     spawn_local(all_usage_driver);
 
     loop {

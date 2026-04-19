@@ -2,7 +2,7 @@ use bachelor::{
     broadcast::spmc::SpmcBroadcastConsumer,
     watch::{MpmcWatchRefProducer, MpmcWatchRefSource, mpmc_watch},
 };
-use shared::model::{UsageSnapshot};
+use shared::model::UsageSnapshot;
 use shared::protocol::UsageIncrement;
 
 pub fn create(

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-pub mod rest;
 pub mod all;
+pub mod rest;
 
 #[derive(Default, Clone, Copy)]
 pub struct StartupGap(Duration);

@@ -128,8 +128,11 @@ async fn handle_client(
                 let now = Timestamp::now();
 
                 let current_usage = usage_rx.get();
-                let increment =
-                    UsageIncrement::new(current_usage.saturating_delta(&previous_usage), last_end, now);
+                let increment = UsageIncrement::new(
+                    current_usage.saturating_delta(&previous_usage),
+                    last_end,
+                    now,
+                );
                 last_end = now;
                 previous_usage = current_usage;
                 let msg = ServerMessage::NewUsage(Box::new(increment));
