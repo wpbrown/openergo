@@ -1,3 +1,4 @@
+pub mod config;
 mod telemetry;
 mod usage;
 
@@ -43,7 +44,16 @@ fn find_socket_path() -> PathBuf {
 }
 
 async fn run() -> Result<(), Report> {
-    let _meter_provider = telemetry::init();
+    let config = config::Config::load()?;
+    let telemetry = config.telemetry();
+
+    let _meter_provider = if telemetry.is_some_and(|t| t.enabled()) {
+        Some(telemetry::init())
+    } else {
+        log::info!("Telemetry disabled by config");
+        None
+    };
+
     let socket_path = find_socket_path();
     log::info!("Using socket path: {}", socket_path.display());
 
@@ -61,8 +71,11 @@ async fn run() -> Result<(), Report> {
     spawn_local(rest_driver);
 
     // All-time usage driver
-    let (_all_usage_source, all_usage_driver) =
-        usage::all::create(usage_source.subscribe(), Default::default());
+    let (_all_usage_source, all_usage_driver) = usage::all::create(
+        usage_source.subscribe(),
+        Default::default(),
+        telemetry.is_some_and(|t| t.report_usage()),
+    );
     spawn_local(all_usage_driver);
 
     loop {

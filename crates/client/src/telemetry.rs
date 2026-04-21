@@ -4,7 +4,6 @@ use opentelemetry_sdk::{
     metrics::{SdkMeterProvider, periodic_reader_with_async_runtime::PeriodicReader},
     runtime::Tokio,
 };
-use std::time::Duration;
 
 pub fn init() -> SdkMeterProvider {
     let exporter = opentelemetry_otlp::MetricExporter::builder()
@@ -13,9 +12,7 @@ pub fn init() -> SdkMeterProvider {
         .build()
         .expect("Failed to create OTLP metric exporter");
 
-    let reader = PeriodicReader::builder(exporter, Tokio)
-        .with_interval(Duration::from_secs(5))
-        .build();
+    let reader = PeriodicReader::builder(exporter, Tokio).build();
 
     let provider = SdkMeterProvider::builder().with_reader(reader).build();
 

@@ -6,7 +6,6 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageIncrement {
-    #[serde(flatten)]
     pub delta: UsageDelta,
     pub start: Timestamp,
     pub end: Timestamp,

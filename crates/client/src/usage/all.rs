@@ -2,20 +2,27 @@ use bachelor::{
     broadcast::spmc::SpmcBroadcastConsumer,
     watch::{MpmcWatchRefProducer, MpmcWatchRefSource, mpmc_watch},
 };
+use futures::future::{Either, join};
 use shared::model::UsageSnapshot;
 use shared::protocol::UsageIncrement;
 
 pub fn create(
     usage_rx: SpmcBroadcastConsumer<UsageIncrement>,
     initial_state: UsageSnapshot,
+    report_usage: bool,
 ) -> (MpmcWatchRefSource<UsageSnapshot>, impl Future) {
     let (state_tx, state_source) = mpmc_watch(initial_state);
-    let telemetry_consumer = state_source.subscribe_forward();
     let driver = Driver { usage_rx, state_tx };
-    (
-        state_source,
-        futures::future::join(driver.run(), telemetry::run(telemetry_consumer)),
-    )
+
+    let future = if report_usage {
+        let telemetry_consumer = state_source.subscribe_forward();
+        Either::Left(join(driver.run(), telemetry::run(telemetry_consumer)))
+    } else {
+        log::info!("Usage telemetry reporting disabled");
+        Either::Right(async { (driver.run().await, ()) })
+    };
+
+    (state_source, future)
 }
 
 struct Driver {
@@ -99,10 +106,17 @@ pub mod telemetry {
     pub async fn run(mut consumer: MpmcWatchRefConsumer<UsageSnapshot>) {
         use std::time::Duration;
 
-        const REPORT_INTERVAL: Duration = Duration::from_secs(60);
+        const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
+        const METRIC_EXPORT_INTERVAL_NAME: &str = "OTEL_METRIC_EXPORT_INTERVAL";
+
+        let report_interval = std::env::var(METRIC_EXPORT_INTERVAL_NAME)
+            .ok()
+            .and_then(|v| v.parse().map(Duration::from_millis).ok())
+            .unwrap_or(DEFAULT_INTERVAL);
 
         let instruments = Instruments::new();
         let mut prev = consumer.get();
+        let mut interval = tokio::time::interval(report_interval);
 
         loop {
             // Wait for at least one change
@@ -116,7 +130,7 @@ pub mod telemetry {
             prev = current;
 
             // Rate limit: don't report more often than the export interval
-            tokio::time::sleep(REPORT_INTERVAL).await;
+            interval.tick().await;
         }
     }
 }
