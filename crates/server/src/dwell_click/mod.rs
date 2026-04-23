@@ -178,7 +178,10 @@ pub mod driver {
                     self.dwell_deadline =
                         Some(Instant::now() + self.config.dwell_duration_threshold);
                 }
-                Event::MousePress { .. } | Event::KeyPress { .. } | Event::MouseScroll(_) => {
+                Event::MousePress { .. }
+                | Event::KeyPress { .. }
+                | Event::MouseScrollNotch(_)
+                | Event::MouseScrollHiRes(_) => {
                     self.reset_movement();
                     self.dwell_deadline = None;
                 }

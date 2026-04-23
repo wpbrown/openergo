@@ -45,6 +45,7 @@ pub mod telemetry {
         click_count: Counter<u64>,
         drag_duration_secs: Counter<f64>,
         key_count: Counter<u64>,
+        scroll_count: Counter<u64>,
         left_shift_secs: Counter<f64>,
         left_ctrl_secs: Counter<f64>,
         left_alt_secs: Counter<f64>,
@@ -62,6 +63,7 @@ pub mod telemetry {
                 click_count: meter.u64_counter("usage.click_count").build(),
                 drag_duration_secs: meter.f64_counter("usage.drag_duration_secs").build(),
                 key_count: meter.u64_counter("usage.key_count").build(),
+                scroll_count: meter.u64_counter("usage.scroll_count").build(),
                 left_shift_secs: meter.f64_counter("usage.left_modifier.shift_secs").build(),
                 left_ctrl_secs: meter.f64_counter("usage.left_modifier.ctrl_secs").build(),
                 left_alt_secs: meter.f64_counter("usage.left_modifier.alt_secs").build(),
@@ -78,6 +80,7 @@ pub mod telemetry {
             self.drag_duration_secs
                 .add(delta.drag_duration.as_secs_f64(), &[]);
             self.key_count.add(delta.key_count, &[]);
+            self.scroll_count.add(delta.scroll_count, &[]);
 
             let l = &delta.left_modifier_duration;
             self.left_shift_secs.add(l.shift.as_secs_f64(), &[]);

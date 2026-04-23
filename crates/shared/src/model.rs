@@ -8,6 +8,7 @@ pub struct UsageDelta {
     pub click_count: u64,
     pub drag_duration: Duration,
     pub key_count: u64,
+    pub scroll_count: u64,
     pub left_modifier_duration: ModifierUsageDelta,
     pub right_modifier_duration: ModifierUsageDelta,
 }
@@ -27,6 +28,7 @@ pub struct UsageSnapshot {
     #[serde_as(as = "DurationNanoSeconds<u64>")]
     pub drag_duration: Duration,
     pub key_count: u64,
+    pub scroll_count: u64,
     pub left_modifier_duration: ModifierUsageSnapshot,
     pub right_modifier_duration: ModifierUsageSnapshot,
 }
@@ -36,6 +38,7 @@ impl AddAssign<&UsageDelta> for UsageSnapshot {
         self.click_count += delta.click_count;
         self.drag_duration += delta.drag_duration;
         self.key_count += delta.key_count;
+        self.scroll_count += delta.scroll_count;
         self.left_modifier_duration += &delta.left_modifier_duration;
         self.right_modifier_duration += &delta.right_modifier_duration;
     }
@@ -56,6 +59,7 @@ impl UsageSnapshot {
             click_count: self.click_count.saturating_sub(previous.click_count),
             drag_duration: self.drag_duration.saturating_sub(previous.drag_duration),
             key_count: self.key_count.saturating_sub(previous.key_count),
+            scroll_count: self.scroll_count.saturating_sub(previous.scroll_count),
             left_modifier_duration: self
                 .left_modifier_duration
                 .saturating_delta(&previous.left_modifier_duration),

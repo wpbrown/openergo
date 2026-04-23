@@ -16,7 +16,8 @@ pub enum Event {
     MouseMoveY(i32),
     MousePress { button: KeyCode, state: ButtonState },
     KeyPress { key: KeyCode, state: ButtonState },
-    MouseScroll(i32),
+    MouseScrollNotch(i32),
+    MouseScrollHiRes(i32),
 }
 
 pub fn open_event_stream(path: &Path) -> Result<EventStream, io::Error> {
@@ -37,9 +38,8 @@ fn translate_event(raw: &evdev::InputEvent) -> Option<Event> {
         EventSummary::RelativeAxis(_, code, value) => match code {
             RelativeAxisCode::REL_X => Some(Event::MouseMoveX(value)),
             RelativeAxisCode::REL_Y => Some(Event::MouseMoveY(value)),
-            RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_WHEEL_HI_RES => {
-                Some(Event::MouseScroll(value))
-            }
+            RelativeAxisCode::REL_WHEEL => Some(Event::MouseScrollNotch(value)),
+            RelativeAxisCode::REL_WHEEL_HI_RES => Some(Event::MouseScrollHiRes(value)),
             _ => None,
         },
         EventSummary::Key(_, key, value) => {

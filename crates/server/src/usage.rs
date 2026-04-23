@@ -11,7 +11,7 @@ use tokio::time::{Instant, timeout_at};
 
 #[derive(Debug, Clone)]
 pub struct DragConfig {
-    pub min_distance: i32,
+    pub min_distance: u32,
     pub min_duration: Duration,
 }
 
@@ -98,7 +98,7 @@ impl Driver {
 /// Tracks active drag state for a mouse button.
 struct DragTracker {
     start_time: std::time::Instant,
-    distance: i32,
+    distance: u32,
 }
 
 /// Tracks when a modifier key was pressed.
@@ -148,16 +148,23 @@ impl Controller {
             Event::MouseMoveY(dy) => self.handle_mouse_move(*dy),
             Event::MousePress { button, state } => self.handle_mouse_button(*button, *state),
             Event::KeyPress { key, state } => self.handle_key(*key, *state),
-            Event::MouseScroll(_) => false,
+            Event::MouseScrollNotch(value) => self.handle_mouse_scroll(*value),
+            Event::MouseScrollHiRes(_) => false,
         }
     }
 
     fn handle_mouse_move(&mut self, delta: i32) -> bool {
         if let Some(ref mut drag) = self.active_drag {
-            drag.distance += delta.abs();
+            drag.distance = drag.distance.saturating_add(delta.unsigned_abs());
         }
 
         false
+    }
+
+    fn handle_mouse_scroll(&mut self, value: i32) -> bool {
+        let ticks = u64::from(value.unsigned_abs());
+        self.snapshot.scroll_count = self.snapshot.scroll_count.saturating_add(ticks);
+        ticks > 0
     }
 
     fn handle_mouse_button(&mut self, button: KeyCode, button_state: ButtonState) -> bool {
