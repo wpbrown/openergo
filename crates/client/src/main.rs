@@ -107,4 +107,3 @@ async fn run(args: Args) -> Result<(), Report> {
         }
     }
 }
-

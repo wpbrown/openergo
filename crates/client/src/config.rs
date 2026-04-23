@@ -45,4 +45,3 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("client.toml"))
     }
 }
-
