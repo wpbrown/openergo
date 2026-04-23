@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 bachelor = { version = "0.0.7", features = ["stream", "sink"] }
+clap = { version = "4", features = ["derive"] }
 directories = "6"
 env_logger = "0.11"
 futures = "0.3"
@@ -21,4 +22,3 @@ shared = { path = "../shared" }
 tokio = { version = "1", features = ["rt", "net", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 toml = "0.8"
-users = "0.11"

@@ -1,5 +1,6 @@
 use crate::usage::rest::RestState;
 use bachelor::broadcast::spmc::broadcast;
+use clap::Parser;
 use futures::future::{Either, select};
 use rootcause::prelude::*;
 use std::num::NonZeroUsize;
@@ -13,32 +14,46 @@ mod config;
 mod telemetry;
 mod usage;
 
+const DEFAULT_SERVER_SOCKET_PATH: &str = "/run/openergo.sock";
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to the server's Unix domain socket.
+    #[arg(long, default_value = DEFAULT_SERVER_SOCKET_PATH)]
+    server_socket_path: PathBuf,
+
+    /// Path to a TOML configuration file.
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+}
+
 fn main() {
     env_logger::init();
+    let args = Args::parse();
 
-    if let Err(report) = startup() {
+    if let Err(report) = startup(args) {
         eprintln!("{report}");
         std::process::exit(1);
     }
 }
 
-fn startup() -> Result<(), Report> {
+fn startup(args: Args) -> Result<(), Report> {
     let rt = tokio::runtime::LocalRuntime::new().context("Failed to create tokio runtime")?;
-    rt.block_on(run())
+    rt.block_on(run(args))
 }
 
-fn find_socket_path() -> PathBuf {
-    let uid = users::get_current_uid();
-    let user_path = PathBuf::from(format!("/run/user/{uid}/openergo.sock"));
-    if user_path.exists() {
-        user_path
+async fn run(args: Args) -> Result<(), Report> {
+    let config_path = args.config.unwrap_or_else(config::Config::default_path);
+    let config = if config_path.exists() {
+        config::Config::load(&config_path).context("Failed to load configuration")?
     } else {
-        PathBuf::from("/run/openergo.sock")
-    }
-}
-
-async fn run() -> Result<(), Report> {
-    let config = config::Config::load()?;
+        log::info!(
+            "No config file found at {}, using defaults",
+            config_path.display()
+        );
+        config::Config::default()
+    };
     let telemetry = config.telemetry();
 
     let _meter_provider = if telemetry.is_some_and(|t| t.enabled()) {
@@ -48,8 +63,7 @@ async fn run() -> Result<(), Report> {
         None
     };
 
-    let socket_path = find_socket_path();
-    log::info!("Using socket path: {}", socket_path.display());
+    log::info!("Using socket path: {}", args.server_socket_path.display());
 
     const USAGE_BROADCAST_CAPACITY: NonZeroUsize =
         NonZeroUsize::new(16).expect("broadcast capacity must be non-zero");
@@ -80,7 +94,7 @@ async fn run() -> Result<(), Report> {
 
     // Reconnect loop takes ownership of usage_producer. When it returns
     // (on ctrl_c), the producer is dropped, closing the broadcast channel.
-    client::reconnect_loop(&socket_path, usage_producer).await?;
+    client::reconnect_loop(&args.server_socket_path, usage_producer).await?;
 
     // Drivers see Closed and exit their loops. If the rest driver
     // returns an error, propagate it.
@@ -93,3 +107,4 @@ async fn run() -> Result<(), Report> {
         }
     }
 }
+
