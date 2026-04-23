@@ -1,28 +1,18 @@
 use bachelor::{
     broadcast::spmc::SpmcBroadcastConsumer,
+    error::Closed,
     watch::{MpmcWatchRefProducer, MpmcWatchRefSource, mpmc_watch},
 };
-use futures::future::{Either, join};
 use shared::model::UsageSnapshot;
 use shared::protocol::UsageIncrement;
 
 pub fn create(
     usage_rx: SpmcBroadcastConsumer<UsageIncrement>,
     initial_state: UsageSnapshot,
-    report_usage: bool,
-) -> (MpmcWatchRefSource<UsageSnapshot>, impl Future) {
+) -> (MpmcWatchRefSource<UsageSnapshot>, impl Future<Output = ()>) {
     let (state_tx, state_source) = mpmc_watch(initial_state);
     let driver = Driver { usage_rx, state_tx };
-
-    let future = if report_usage {
-        let telemetry_consumer = state_source.subscribe_forward();
-        Either::Left(join(driver.run(), telemetry::run(telemetry_consumer)))
-    } else {
-        log::info!("Usage telemetry reporting disabled");
-        Either::Right(async { (driver.run().await, ()) })
-    };
-
-    (state_source, future)
+    (state_source, driver.run())
 }
 
 struct Driver {
@@ -31,17 +21,17 @@ struct Driver {
 }
 
 impl Driver {
-    async fn recv_activity(&mut self) {
+    async fn recv_activity(&mut self) -> Result<(), Closed> {
         let Self { usage_rx, state_tx } = self;
-        let _ = usage_rx
-            .recv_ref(|increment| state_tx.update(|state| *state += &increment.delta))
-            .await;
+        usage_rx
+            .recv_ref(|increment| {
+                let _ = state_tx.update(|state| *state += &increment.delta);
+            })
+            .await
     }
 
     async fn run(mut self) {
-        loop {
-            self.recv_activity().await;
-        }
+        while self.recv_activity().await.is_ok() {}
     }
 }
 
@@ -103,7 +93,11 @@ pub mod telemetry {
         }
     }
 
-    pub async fn run(mut consumer: MpmcWatchRefConsumer<UsageSnapshot>) {
+    pub fn create(consumer: MpmcWatchRefConsumer<UsageSnapshot>) -> impl Future {
+        run(consumer)
+    }
+
+    async fn run(mut consumer: MpmcWatchRefConsumer<UsageSnapshot>) {
         use std::time::Duration;
 
         const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);

@@ -18,7 +18,7 @@ rodio = { version = "0.22", default-features = false, features = ["playback", "w
 rootcause = "0.12"
 serde = { version = "1", features = ["derive"] }
 shared = { path = "../shared" }
-tokio = { version = "1", features = ["rt", "net", "time"] }
+tokio = { version = "1", features = ["rt", "net", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 toml = "0.8"
 users = "0.11"

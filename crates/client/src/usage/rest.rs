@@ -2,9 +2,11 @@ use std::{pin::pin, time::Duration};
 
 use bachelor::{
     broadcast::spmc::SpmcBroadcastConsumer,
+    error::Closed,
     watch::{MpmcWatchRefProducer, MpmcWatchRefSource, mpmc_watch},
 };
 use futures::future::{Either, select};
+use rootcause::prelude::*;
 use shared::{
     model::UsageSnapshot,
     protocol::UsageIncrement,
@@ -25,7 +27,10 @@ pub fn create(
     usage_rx: SpmcBroadcastConsumer<UsageIncrement>,
     initial_state: RestState,
     startup_gap: StartupGap,
-) -> (MpmcWatchRefSource<RestState>, impl Future) {
+) -> (
+    MpmcWatchRefSource<RestState>,
+    impl Future<Output = Result<(), Report>>,
+) {
     let (state_tx, state_source) = mpmc_watch(initial_state);
     let driver = Driver { usage_rx, state_tx };
     (state_source, driver.run(startup_gap))
@@ -37,11 +42,13 @@ pub struct Driver {
 }
 
 impl Driver {
-    async fn recv_activity(&mut self) {
+    async fn recv_activity(&mut self) -> Result<(), Closed> {
         let Self { usage_rx, state_tx } = self;
-        let _ = usage_rx
-            .recv_ref(|increment| state_tx.update(|state| state.usage += &increment.delta))
-            .await;
+        usage_rx
+            .recv_ref(|increment| {
+                let _ = state_tx.update(|state| state.usage += &increment.delta);
+            })
+            .await
     }
 
     /// Detects inactivity and triggers rest resets.
@@ -51,14 +58,9 @@ impl Driver {
     /// - Runtime inactivity (no increments arriving)
     /// - Gaps from app startup (via startup_gap parameter)
     /// - System suspend (boottime timer fires immediately on resume if deadline passed)
-    pub async fn run(mut self, startup_gap: StartupGap) {
-        let mut timer = match BoottimeTimer::new() {
-            Ok(t) => t,
-            Err(e) => {
-                log::error!("Failed to create boottime timer for rest_driver: {}", e);
-                return;
-            }
-        };
+    pub async fn run(mut self, startup_gap: StartupGap) -> Result<(), Report> {
+        let mut timer =
+            BoottimeTimer::new().context("Failed to create boottime timer for rest driver")?;
 
         // Handle startup gap
         if startup_gap.duration() >= REST_TIMEOUT {
@@ -81,7 +83,8 @@ impl Driver {
 
                 match select(pin!(sleep), pin!(activity)).await {
                     Either::Left((result, _)) => Some(result),
-                    Either::Right((_, _)) => None,
+                    Either::Right((Ok(()), _)) => None,
+                    Either::Right((Err(Closed), _)) => return Ok(()),
                 }
             };
 
@@ -90,11 +93,7 @@ impl Driver {
                     log::debug!("rest period completed");
                     let _ = self.state_tx.set(RestState::default());
                 }
-                Some(Err(e)) => {
-                    log::error!("rest_driver timer error: {}", e);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
+                Some(Err(e)) => Err(e).context("Rest driver timer error")?,
                 None => {
                     // Activity arrived, reset deadline
                     deadline = BootInstant::now() + REST_TIMEOUT;
@@ -103,7 +102,9 @@ impl Driver {
             }
 
             // After rest completed, wait for next activity before starting a new rest timer
-            self.recv_activity().await;
+            if self.recv_activity().await.is_err() {
+                return Ok(());
+            }
             deadline = BootInstant::now() + REST_TIMEOUT;
         }
     }

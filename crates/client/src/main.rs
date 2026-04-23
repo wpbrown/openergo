@@ -1,23 +1,17 @@
-pub mod config;
-mod telemetry;
-mod usage;
-
-use bachelor::broadcast::spmc::{SpmcBroadcastProducer, broadcast};
-use futures::StreamExt;
-use rodio::Decoder;
+use crate::usage::rest::RestState;
+use bachelor::broadcast::spmc::broadcast;
+use futures::future::{Either, select};
 use rootcause::prelude::*;
-use shared::protocol::{ClientCodec, ServerMessage, UsageIncrement};
-use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::time::Duration;
-use tokio::net::UnixStream;
+use std::pin::pin;
 use tokio::task::spawn_local;
-use tokio_util::codec::Framed;
 
-use crate::usage::rest::RestState;
-
-const CLICK_WAV: &[u8] = include_bytes!("../assets/click.wav");
+mod click;
+mod client;
+mod config;
+mod telemetry;
+mod usage;
 
 fn main() {
     env_logger::init();
@@ -48,7 +42,7 @@ async fn run() -> Result<(), Report> {
     let telemetry = config.telemetry();
 
     let _meter_provider = if telemetry.is_some_and(|t| t.enabled()) {
-        Some(telemetry::init())
+        Some(telemetry::init().context("Failed to initialize telemetry")?)
     } else {
         log::info!("Telemetry disabled by config");
         None
@@ -60,7 +54,7 @@ async fn run() -> Result<(), Report> {
     const USAGE_BROADCAST_CAPACITY: NonZeroUsize =
         NonZeroUsize::new(16).expect("broadcast capacity must be non-zero");
 
-    let (mut usage_producer, usage_source) = broadcast(USAGE_BROADCAST_CAPACITY);
+    let (usage_producer, usage_source) = broadcast(USAGE_BROADCAST_CAPACITY);
 
     // Rest driver
     let (_rest_state, rest_driver) = usage::rest::create(
@@ -68,59 +62,34 @@ async fn run() -> Result<(), Report> {
         RestState::default(),
         usage::StartupGap::default(),
     );
-    spawn_local(rest_driver);
+    let rest_task = spawn_local(rest_driver);
 
     // All-time usage driver
-    let (_all_usage_source, all_usage_driver) = usage::all::create(
-        usage_source.subscribe(),
-        Default::default(),
-        telemetry.is_some_and(|t| t.report_usage()),
-    );
-    spawn_local(all_usage_driver);
+    let (all_usage_source, all_usage_driver) =
+        usage::all::create(usage_source.subscribe(), Default::default());
+    let all_usage_task = spawn_local(all_usage_driver);
 
-    loop {
-        match UnixStream::connect(&socket_path).await {
-            Ok(stream) => {
-                log::info!("Connected to server");
-                let mut framed = Framed::new(stream, ClientCodec::default()).fuse();
-                handle_connection(&mut framed, &mut usage_producer).await;
-                log::info!("Disconnected from server");
-            }
-            Err(e) => {
-                log::debug!("Failed to connect: {e}");
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
+    // Telemetry driver (optional)
+    if telemetry.is_some_and(|t| t.report_usage()) {
+        spawn_local(usage::all::telemetry::create(
+            all_usage_source.subscribe_forward(),
+        ));
+    } else {
+        log::info!("Usage telemetry reporting disabled");
     }
-}
 
-type FramedStream = futures::stream::Fuse<Framed<UnixStream, ClientCodec>>;
+    // Reconnect loop takes ownership of usage_producer. When it returns
+    // (on ctrl_c), the producer is dropped, closing the broadcast channel.
+    client::reconnect_loop(&socket_path, usage_producer).await?;
 
-async fn handle_connection(
-    framed: &mut FramedStream,
-    usage_producer: &mut SpmcBroadcastProducer<UsageIncrement>,
-) {
-    let handle =
-        rodio::DeviceSinkBuilder::open_default_sink().expect("Failed to open audio output");
-
-    while let Some(msg) = framed.next().await {
-        match msg {
-            Ok(ServerMessage::Click) => {
-                log::info!("Click");
-                let cursor = Cursor::new(CLICK_WAV);
-                if let Ok(source) = Decoder::try_from(cursor) {
-                    handle.mixer().add(source);
-                }
-            }
-            Ok(ServerMessage::NewUsage(increment)) => {
-                log::trace!("Usage: {increment:?}");
-                let _ = usage_producer.send(*increment).await;
-            }
-            Err(e) => {
-                log::error!("Error receiving message: {e}");
-                return;
-            }
+    // Drivers see Closed and exit their loops. If the rest driver
+    // returns an error, propagate it.
+    match select(pin!(rest_task), pin!(all_usage_task)).await {
+        Either::Left((Ok(result), _)) => result,
+        Either::Right((Ok(()), _)) => Ok(()),
+        // panic=abort: JoinError can only be a cancellation, not a panic
+        Either::Left((Err(e), _)) | Either::Right((Err(e), _)) => {
+            bail!("Driver task cancelled: {e}")
         }
     }
 }
