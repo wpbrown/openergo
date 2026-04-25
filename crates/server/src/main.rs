@@ -3,11 +3,13 @@ use bachelor::channel::mpsc::MpscChannelConsumer;
 use clap::Parser;
 use futures::StreamExt;
 use futures::future::{Either, select};
-use openergo_server::device_events::{DeviceFilter, DeviceMatcher};
+use openergo_server::device_events::{DeviceFilter, DeviceLabelStore, DeviceMatcher};
 use openergo_server::{config, device_events, dwell_click, server, usage};
 use rootcause::prelude::*;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::rc::Rc;
 use tokio::net::UnixListener;
 use tokio::task::spawn_local;
 
@@ -31,6 +33,8 @@ struct Args {
 
 struct RuntimeConfig {
     device_filter: DeviceFilter,
+    label_store: Rc<DeviceLabelStore>,
+    usage_config: usage::UsageConfig,
     socket_path: PathBuf,
     socket_user: Option<String>,
     socket_group: Option<String>,
@@ -54,7 +58,7 @@ fn startup(args: Args) -> Result<(), Report> {
         Some(path) => Some(config::Config::load(path).context("Failed to load configuration")?),
         None => None,
     };
-    let runtime_config = runtime_config_from_sources(args, file_config);
+    let runtime_config = runtime_config_from_sources(args, file_config)?;
 
     rt.block_on(async move {
         let listener = listener::create_listener(
@@ -66,23 +70,35 @@ fn startup(args: Args) -> Result<(), Report> {
         run(
             listener,
             runtime_config.device_filter,
+            runtime_config.label_store,
+            runtime_config.usage_config,
             runtime_config.dwell_click_enabled,
         )
         .await
     })
 }
 
-fn runtime_config_from_sources(args: Args, file_config: Option<config::Config>) -> RuntimeConfig {
-    let (socket, devices, dwell_click_enabled) = match file_config {
+fn runtime_config_from_sources(
+    args: Args,
+    file_config: Option<config::Config>,
+) -> Result<RuntimeConfig, Report> {
+    let (socket, devices, usage_section, dwell_click_enabled) = match file_config {
         Some(config::Config {
             socket,
             devices,
             dwell_click,
-        }) => (socket, devices, dwell_click.is_some_and(|dc| dc.allow())),
-        None => (None, None, false),
+            usage,
+        }) => (
+            socket,
+            devices,
+            usage,
+            dwell_click.is_some_and(|dc| dc.allow()),
+        ),
+        None => (None, None, None, false),
     };
 
-    let device_filter = device_filter_from_config(devices);
+    let (device_filter, label_store) = device_filter_from_config(devices);
+    let usage_config = usage_config_from_sources(usage_section, &label_store)?;
     let (cfg_socket_path, cfg_user, cfg_group) = match socket {
         Some(config::SocketConfig { path, user, group }) => (path, user, group),
         None => (None, None, None),
@@ -93,13 +109,39 @@ fn runtime_config_from_sources(args: Args, file_config: Option<config::Config>) 
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH));
     let socket_user = args.user.or(cfg_user);
 
-    RuntimeConfig {
+    Ok(RuntimeConfig {
         device_filter,
+        label_store,
+        usage_config,
         socket_path,
         socket_user,
         socket_group: cfg_group,
         dwell_click_enabled,
+    })
+}
+
+fn usage_config_from_sources(
+    section: Option<config::UsageConfig>,
+    label_store: &DeviceLabelStore,
+) -> Result<usage::UsageConfig, Report> {
+    let mut exclude = Vec::new();
+    if let Some(config::UsageConfig {
+        exclude: Some(labels),
+    }) = section
+    {
+        for label in labels {
+            let resolved = label_store.get(&label).ok_or_else(|| {
+                report!(
+                    "usage.exclude references unknown device label {label:?}; \
+                     it must be defined under [devices.include]"
+                )
+            })?;
+            if !exclude.contains(&resolved) {
+                exclude.push(resolved);
+            }
+        }
     }
+    Ok(usage::UsageConfig { exclude })
 }
 
 const EVENT_BROADCAST_CAPACITY: NonZeroUsize =
@@ -108,10 +150,12 @@ const EVENT_BROADCAST_CAPACITY: NonZeroUsize =
 async fn run(
     listener: UnixListener,
     device_filter: DeviceFilter,
+    label_store: Rc<DeviceLabelStore>,
+    usage_config: usage::UsageConfig,
     dwell_click_enabled: bool,
 ) -> Result<(), Report> {
     // Device Events
-    let (device_events, device_events_driver) = device_events::create(device_filter);
+    let (device_events, device_events_driver) = device_events::create(device_filter, label_store);
     let device_events_task = spawn_local(device_events_driver.run());
 
     let (device_events_sink, device_events_source) = broadcast(EVENT_BROADCAST_CAPACITY);
@@ -129,6 +173,7 @@ async fn run(
     // Usage Events
     let (usage_events, usage_driver) = usage::create(
         usage::DragConfig::default(),
+        usage_config,
         device_events_source.subscribe(),
     );
     spawn_local(usage_driver.run());
@@ -176,31 +221,46 @@ async fn forward_commands(
     }
 }
 
-fn device_filter_from_config(devices: Option<config::DevicesConfig>) -> DeviceFilter {
-    let Some(devices) = devices else {
-        return DeviceFilter::default();
+fn device_filter_from_config(
+    devices: Option<config::DevicesConfig>,
+) -> (DeviceFilter, Rc<DeviceLabelStore>) {
+    let mut label_store = DeviceLabelStore::new();
+    let auto_detect_label = label_store.auto_detect();
+    let (auto_detect, include, exclude) = match devices {
+        Some(devices) => {
+            let convert = |matchers: HashMap<String, config::DeviceMatcher>,
+                           store: &mut DeviceLabelStore|
+             -> Vec<DeviceMatcher> {
+                matchers
+                    .into_iter()
+                    .map(|(label, m)| DeviceMatcher {
+                        label: store.get_or_intern(&label),
+                        path: m.path.map(PathBuf::from),
+                        name: m.name,
+                        model: m.model,
+                        model_id: m.model_id,
+                        vendor_id: m.vendor_id,
+                        serial: m.serial,
+                        bus: m.bus,
+                    })
+                    .collect()
+            };
+            let auto_detect = devices.auto_detect();
+            let include = devices
+                .include
+                .map(|m| convert(m, &mut label_store))
+                .unwrap_or_default();
+            let exclude = devices
+                .exclude
+                .map(|m| convert(m, &mut label_store))
+                .unwrap_or_default();
+            (auto_detect, include, exclude)
+        }
+        None => (true, Vec::new(), Vec::new()),
     };
 
-    let convert_matchers = |matchers: Vec<config::DeviceMatcher>| -> Vec<DeviceMatcher> {
-        matchers
-            .into_iter()
-            .map(|m| DeviceMatcher {
-                path: m.path.map(PathBuf::from),
-                name: m.name,
-                model: m.model,
-                model_id: m.model_id,
-                vendor_id: m.vendor_id,
-                serial: m.serial,
-                bus: m.bus,
-            })
-            .collect()
-    };
-
-    DeviceFilter::new(
-        devices.auto_detect(),
-        devices.include.map(convert_matchers).unwrap_or_default(),
-        devices.exclude.map(convert_matchers).unwrap_or_default(),
-    )
+    let filter = DeviceFilter::new(auto_detect, auto_detect_label, include, exclude);
+    (filter, Rc::new(label_store))
 }
 
 mod listener {
@@ -347,8 +407,10 @@ mod tests {
                 }),
                 dwell_click: None,
                 devices: None,
+                usage: None,
             }),
-        );
+        )
+        .expect("runtime config should build");
 
         assert_eq!(runtime.socket_path, PathBuf::from("/tmp/from-cli.sock"));
         assert_eq!(runtime.socket_user.as_deref(), Some("alice"));
@@ -371,8 +433,10 @@ mod tests {
                 }),
                 dwell_click: None,
                 devices: None,
+                usage: None,
             }),
-        );
+        )
+        .expect("runtime config should build");
 
         assert_eq!(runtime.socket_path, PathBuf::from("/tmp/from-config.sock"));
     }
@@ -386,7 +450,8 @@ mod tests {
                 config: None,
             },
             None,
-        );
+        )
+        .expect("runtime config should build");
 
         assert_eq!(runtime.socket_path, PathBuf::from(DEFAULT_SOCKET_PATH));
     }

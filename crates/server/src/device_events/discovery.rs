@@ -1,37 +1,34 @@
+use super::label::DeviceLabel;
 use std::path::{Path, PathBuf};
 
 /// Controls which udev devices are monitored.
 pub struct DeviceFilter {
     auto_detect: bool,
+    auto_detect_label: DeviceLabel,
     include: Vec<DeviceMatcher>,
     exclude: Vec<DeviceMatcher>,
-}
-
-impl Default for DeviceFilter {
-    fn default() -> Self {
-        Self {
-            auto_detect: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-        }
-    }
 }
 
 impl DeviceFilter {
     pub fn new(
         auto_detect: bool,
+        auto_detect_label: DeviceLabel,
         include: Vec<DeviceMatcher>,
         exclude: Vec<DeviceMatcher>,
     ) -> Self {
         Self {
             auto_detect,
+            auto_detect_label,
             include,
             exclude,
         }
     }
 
-    /// Returns `true` if the device should be monitored.
-    pub fn matches(&self, device: &udev::Device) -> bool {
+    /// Returns the [`DeviceLabel`] for a device that should be monitored, or
+    /// `None` if it should be filtered out. Auto-detected devices return the
+    /// filter's `auto_detect_label`; explicitly included devices return their
+    /// configured label.
+    pub fn matches(&self, device: &udev::Device) -> Option<DeviceLabel> {
         log::debug!(
             "Evaluating device: {} node: {:?}",
             device.syspath().display(),
@@ -42,22 +39,29 @@ impl DeviceFilter {
                 .and_then(|f| f.to_str())
                 .is_some_and(|f| f.starts_with("event"))
         }) {
-            return false;
+            return None;
         }
-        let base = self.auto_detect && is_input_device(device);
-        let included = self.include.iter().any(|m| matcher_matches(m, device));
-        let excluded = self.exclude.iter().any(|m| matcher_matches(m, device));
-        (base || included) && !excluded
+        if self.exclude.iter().any(|m| matcher_matches(m, device)) {
+            return None;
+        }
+        if let Some(included) = self.include.iter().find(|m| matcher_matches(m, device)) {
+            return Some(included.label);
+        }
+        if self.auto_detect && is_input_device(device) {
+            return Some(self.auto_detect_label);
+        }
+        None
     }
 }
 
-/// Discover input devices filtered by the given `DeviceFilter`.
-pub fn find_devices(filter: &DeviceFilter) -> std::io::Result<Vec<udev::Device>> {
+/// Discover input devices filtered by the given `DeviceFilter`. Each result
+/// is paired with the [`DeviceLabel`] that matched it.
+pub fn find_devices(filter: &DeviceFilter) -> std::io::Result<Vec<(udev::Device, DeviceLabel)>> {
     let mut enumerator = udev::Enumerator::new()?;
     enumerator.match_subsystem("input")?;
-    let devices: Vec<udev::Device> = enumerator
+    let devices: Vec<(udev::Device, DeviceLabel)> = enumerator
         .scan_devices()?
-        .filter(|d| filter.matches(d))
+        .filter_map(|d| filter.matches(&d).map(|label| (d, label)))
         .collect();
     Ok(devices)
 }
@@ -76,6 +80,8 @@ fn has_property(device: &udev::Device, name: &str) -> bool {
 /// Matches a device by path and/or udev properties. All specified fields must
 /// match (AND logic).
 pub struct DeviceMatcher {
+    /// Interned friendly label, used in logs and event tagging.
+    pub label: DeviceLabel,
     pub path: Option<PathBuf>,
     pub name: Option<String>,
     pub model: Option<String>,

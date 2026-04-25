@@ -1,4 +1,4 @@
-use crate::device_events::{ButtonState, Event};
+use crate::device_events::{ButtonState, DeviceLabel, Event, EventKind};
 use bachelor::{
     broadcast::spmc::SpmcBroadcastConsumer,
     error::Closed,
@@ -24,6 +24,15 @@ impl Default for DragConfig {
     }
 }
 
+/// Runtime configuration for the usage tracker.
+#[derive(Debug, Default, Clone)]
+pub struct UsageConfig {
+    /// Devices whose events should be ignored when computing usage. Expected
+    /// to be small (a handful of entries), so a linear scan beats the
+    /// overhead of a hash set.
+    pub exclude: Vec<DeviceLabel>,
+}
+
 #[derive(Clone, Copy)]
 pub enum Modifier {
     Shift,
@@ -36,11 +45,12 @@ const NOTIFY_RATE_LIMIT_FAST: Duration = Duration::from_millis(250);
 
 /// Creates a new usage tracker driver.
 pub fn create(
-    config: DragConfig,
+    drag: DragConfig,
+    config: UsageConfig,
     events_rx: SpmcBroadcastConsumer<Event>,
 ) -> (MpmcWatchRefSource<UsageSnapshot>, Driver) {
     let (producer, source) = mpmc_watch(UsageSnapshot::default());
-    let driver = Driver::new(config, events_rx, producer);
+    let driver = Driver::new(drag, config, events_rx, producer);
     (source, driver)
 }
 
@@ -48,18 +58,21 @@ pub struct Driver {
     events_rx: SpmcBroadcastConsumer<Event>,
     usage_tx: MpmcWatchRefProducer<UsageSnapshot>,
     controller: Controller,
+    exclude: Vec<DeviceLabel>,
 }
 
 impl Driver {
     fn new(
-        config: DragConfig,
+        drag: DragConfig,
+        config: UsageConfig,
         events_rx: SpmcBroadcastConsumer<Event>,
         usage_tx: MpmcWatchRefProducer<UsageSnapshot>,
     ) -> Self {
         Self {
             events_rx,
             usage_tx,
-            controller: Controller::new(config),
+            controller: Controller::new(drag),
+            exclude: config.exclude,
         }
     }
 
@@ -70,12 +83,18 @@ impl Driver {
             let Ok(event) = self.events_rx.recv().await else {
                 return;
             };
+            if self.exclude.contains(&event.label) {
+                continue;
+            }
 
             if self.controller.handle_event(&event) {
                 if Instant::now() < publish_not_before {
                     loop {
                         match timeout_at(publish_not_before, self.events_rx.recv()).await {
                             Ok(Ok(event)) => {
+                                if self.exclude.contains(&event.label) {
+                                    continue;
+                                }
                                 self.controller.handle_event(&event);
                             }
                             Ok(Err(Closed)) => return,
@@ -143,13 +162,13 @@ impl Controller {
     }
 
     fn handle_event(&mut self, event: &Event) -> bool {
-        match event {
-            Event::MouseMoveX(dx) => self.handle_mouse_move(*dx),
-            Event::MouseMoveY(dy) => self.handle_mouse_move(*dy),
-            Event::MousePress { button, state } => self.handle_mouse_button(*button, *state),
-            Event::KeyPress { key, state } => self.handle_key(*key, *state),
-            Event::MouseScrollNotch(value) => self.handle_mouse_scroll(*value),
-            Event::MouseScrollHiRes(_) => false,
+        match event.kind {
+            EventKind::MouseMoveX(dx) => self.handle_mouse_move(dx),
+            EventKind::MouseMoveY(dy) => self.handle_mouse_move(dy),
+            EventKind::MousePress { button, state } => self.handle_mouse_button(button, state),
+            EventKind::KeyPress { key, state } => self.handle_key(key, state),
+            EventKind::MouseScrollNotch(value) => self.handle_mouse_scroll(value),
+            EventKind::MouseScrollHiRes(_) => false,
         }
     }
 

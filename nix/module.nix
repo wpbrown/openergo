@@ -71,14 +71,31 @@ let
 
   deviceMatcherIsEmpty = m: deviceMatcherToToml m == { };
 
-  matcherAssertions =
-    label: matchers:
-    lib.imap0 (index: matcher: {
-      assertion = !deviceMatcherIsEmpty matcher;
-      message = "services.openergo.devices.${label}[${toString index}] has no fields set";
-    }) matchers;
+  # `builtins.match` is implicitly anchored, so `+` enforces non-empty.
+  validLabelRegex = "[A-Za-z0-9_-]+";
+  isValidLabel = label: builtins.match validLabelRegex label != null;
 
-  hasIncludeRules = cfg.devices.include != [ ];
+  matcherAssertions =
+    section: matchers:
+    lib.flatten (
+      lib.mapAttrsToList (
+        label: matcher:
+        if !isValidLabel label then
+          [
+            {
+              assertion = false;
+              message = "services.openergo.devices.${section} key \"${label}\" is not a valid label (must be non-empty ASCII alphanumerics, '_' or '-')";
+            }
+          ]
+        else
+          [
+            {
+              assertion = !deviceMatcherIsEmpty matcher;
+              message = "services.openergo.devices.${section}.${label} has no fields set";
+            }
+          ]
+      ) matchers
+    );
 
   configToml =
     let
@@ -89,16 +106,23 @@ let
       };
       devicesSection =
         lib.optionalAttrs
-          (!cfg.devices.autoDetect || cfg.devices.include != [ ] || cfg.devices.exclude != [ ])
+          (!cfg.devices.autoDetect || cfg.devices.include != { } || cfg.devices.exclude != { })
           {
             devices = filterNulls {
               auto_detect = cfg.devices.autoDetect;
-              include = if cfg.devices.include == [ ] then null else map deviceMatcherToToml cfg.devices.include;
-              exclude = if cfg.devices.exclude == [ ] then null else map deviceMatcherToToml cfg.devices.exclude;
+              include =
+                if cfg.devices.include == { } then null else lib.mapAttrs (_: deviceMatcherToToml) cfg.devices.include;
+              exclude =
+                if cfg.devices.exclude == { } then null else lib.mapAttrs (_: deviceMatcherToToml) cfg.devices.exclude;
             };
           };
+      usageSection = lib.optionalAttrs (cfg.usage.exclude != [ ]) {
+        usage.exclude = cfg.usage.exclude;
+      };
     in
-    (pkgs.formats.toml { }).generate "openergo.toml" (dwellClickSection // devicesSection);
+    (pkgs.formats.toml { }).generate "openergo.toml" (
+      dwellClickSection // devicesSection // usageSection
+    );
 in
 {
   options.services.openergo = {
@@ -172,14 +196,25 @@ in
         description = "Whether to auto-detect keyboards, mice, and touchpads.";
       };
       include = mkOption {
-        type = types.listOf deviceMatcherType;
-        default = [ ];
-        description = "Devices to include (in addition to auto-detected, or as the sole set if `autoDetect` is false).";
+        type = types.attrsOf deviceMatcherType;
+        default = { };
+        description = "Devices to include (in addition to auto-detected, or as the sole set if `autoDetect` is false). Keyed by a friendly label used in logs (must match `[A-Za-z0-9_-]+`).";
       };
       exclude = mkOption {
-        type = types.listOf deviceMatcherType;
+        type = types.attrsOf deviceMatcherType;
+        default = { };
+        description = "Devices to exclude from monitoring. Keyed by a friendly label used in logs (must match `[A-Za-z0-9_-]+`).";
+      };
+    };
+
+    usage = {
+      exclude = mkOption {
+        type = types.listOf types.str;
         default = [ ];
-        description = "Devices to exclude from monitoring.";
+        description = ''
+          Friendly device labels to ignore when computing usage. Each entry
+          must be a key defined under `services.openergo.devices.include`.
+        '';
       };
     };
   };
@@ -188,6 +223,10 @@ in
     assertions =
       matcherAssertions "include" cfg.devices.include
       ++ matcherAssertions "exclude" cfg.devices.exclude
+      ++ map (label: {
+        assertion = isValidLabel label && cfg.devices.include ? ${label};
+        message = "services.openergo.usage.exclude entry \"${label}\" is not defined under services.openergo.devices.include";
+      }) cfg.usage.exclude
       ++ [
         {
           assertion = !cfg.dwellClick.allow || config.hardware.uinput.enable;
@@ -197,7 +236,7 @@ in
           '';
         }
         {
-          assertion = cfg.devices.autoDetect || hasIncludeRules;
+          assertion = cfg.devices.autoDetect || cfg.devices.include != { };
           message = ''
             services.openergo.devices.autoDetect is false and no include rules are set;
             no devices would be monitored

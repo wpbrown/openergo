@@ -81,7 +81,7 @@ pub mod driver {
     use tokio::time::Instant;
 
     use super::{ControlMessage, event_sink::EventSink};
-    use crate::device_events::Event;
+    use crate::device_events::{Event, EventKind};
 
     pub struct Driver {
         config: DwellServerConfig,
@@ -167,21 +167,21 @@ pub mod driver {
                 return;
             }
 
-            match event {
-                Event::MouseMoveX(dx) => {
+            match event.kind {
+                EventKind::MouseMoveX(dx) => {
                     self.add_movement(dx);
                     self.dwell_deadline =
                         Some(Instant::now() + self.config.dwell_duration_threshold);
                 }
-                Event::MouseMoveY(dy) => {
+                EventKind::MouseMoveY(dy) => {
                     self.add_movement(dy);
                     self.dwell_deadline =
                         Some(Instant::now() + self.config.dwell_duration_threshold);
                 }
-                Event::MousePress { .. }
-                | Event::KeyPress { .. }
-                | Event::MouseScrollNotch(_)
-                | Event::MouseScrollHiRes(_) => {
+                EventKind::MousePress { .. }
+                | EventKind::KeyPress { .. }
+                | EventKind::MouseScrollNotch(_)
+                | EventKind::MouseScrollHiRes(_) => {
                     self.reset_movement();
                     self.dwell_deadline = None;
                 }

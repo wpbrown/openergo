@@ -1,3 +1,4 @@
+use super::label::DeviceLabel;
 use evdev::{EventStream, EventSummary, KeyCode, RelativeAxisCode};
 use futures::{Stream, StreamExt};
 use std::{io, path::Path};
@@ -10,8 +11,15 @@ pub enum ButtonState {
     Down,
 }
 
+/// A device input event tagged with the originating device's interned label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Event {
+pub struct Event {
+    pub label: DeviceLabel,
+    pub kind: EventKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
     MouseMoveX(i32),
     MouseMoveY(i32),
     MousePress { button: KeyCode, state: ButtonState },
@@ -24,22 +32,25 @@ pub fn open_event_stream(path: &Path) -> Result<EventStream, io::Error> {
     evdev::Device::open(path)?.into_event_stream()
 }
 
-pub fn translate_event_stream(stream: EventStream) -> impl Stream<Item = Result<Event, io::Error>> {
-    stream.filter_map(|result| async {
+pub fn translate_event_stream(
+    stream: EventStream,
+    label: DeviceLabel,
+) -> impl Stream<Item = Result<Event, io::Error>> {
+    stream.filter_map(move |result| async move {
         match result {
-            Ok(raw_event) => translate_event(&raw_event).map(Ok),
+            Ok(raw_event) => translate_event(&raw_event).map(|kind| Ok(Event { label, kind })),
             Err(e) => Some(Err(e)),
         }
     })
 }
 
-fn translate_event(raw: &evdev::InputEvent) -> Option<Event> {
+fn translate_event(raw: &evdev::InputEvent) -> Option<EventKind> {
     match raw.destructure() {
         EventSummary::RelativeAxis(_, code, value) => match code {
-            RelativeAxisCode::REL_X => Some(Event::MouseMoveX(value)),
-            RelativeAxisCode::REL_Y => Some(Event::MouseMoveY(value)),
-            RelativeAxisCode::REL_WHEEL => Some(Event::MouseScrollNotch(value)),
-            RelativeAxisCode::REL_WHEEL_HI_RES => Some(Event::MouseScrollHiRes(value)),
+            RelativeAxisCode::REL_X => Some(EventKind::MouseMoveX(value)),
+            RelativeAxisCode::REL_Y => Some(EventKind::MouseMoveY(value)),
+            RelativeAxisCode::REL_WHEEL => Some(EventKind::MouseScrollNotch(value)),
+            RelativeAxisCode::REL_WHEEL_HI_RES => Some(EventKind::MouseScrollHiRes(value)),
             _ => None,
         },
         EventSummary::Key(_, key, value) => {
@@ -50,9 +61,9 @@ fn translate_event(raw: &evdev::InputEvent) -> Option<Event> {
             };
 
             if is_mouse_button(key) {
-                Some(Event::MousePress { button: key, state })
+                Some(EventKind::MousePress { button: key, state })
             } else {
-                Some(Event::KeyPress { key, state })
+                Some(EventKind::KeyPress { key, state })
             }
         }
         _ => None,

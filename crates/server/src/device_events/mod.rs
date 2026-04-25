@@ -6,8 +6,10 @@ use std::task::{Context, Poll};
 
 mod discovery;
 mod event_source;
+mod label;
 
-pub use event_source::{ButtonState, Event, Key};
+pub use event_source::{ButtonState, Event, EventKind, Key};
+pub use label::{DeviceLabel, DeviceLabelStore};
 
 const DEVICE_CHANNEL_CAPACITY: NonZeroUsize =
     NonZeroUsize::new(16).expect("device channel capacity must be non-zero");
@@ -28,10 +30,13 @@ impl Stream for DeviceEventsSource {
 pub use discovery::{DeviceFilter, DeviceMatcher};
 
 /// Creates a device event source and driver pair.
-pub fn create(filter: DeviceFilter) -> (DeviceEventsSource, driver::Driver) {
+pub fn create(
+    filter: DeviceFilter,
+    label_store: std::rc::Rc<DeviceLabelStore>,
+) -> (DeviceEventsSource, driver::Driver) {
     let (events_tx, events_rx) = mpsc::channel(DEVICE_CHANNEL_CAPACITY);
     let source = DeviceEventsSource { inner: events_rx };
-    let driver = driver::Driver::new(events_tx, filter);
+    let driver = driver::Driver::new(events_tx, filter, label_store);
     (source, driver)
 }
 
@@ -39,6 +44,7 @@ pub mod driver {
     use super::Event;
     use super::async_udev::AsyncMonitorSocket;
     use super::discovery::{self, DeviceFilter};
+    use super::label::{DeviceLabel, DeviceLabelStore};
     use crate::device_events::event_source::{open_event_stream, translate_event_stream};
     use bachelor::channel::mpsc::MpscChannelProducer;
     use evdev::EventStream;
@@ -54,23 +60,33 @@ pub mod driver {
     pub struct Driver {
         events_tx: MpscChannelProducer<Event>,
         filter: Rc<DeviceFilter>,
+        label_store: Rc<DeviceLabelStore>,
     }
 
     impl Driver {
-        pub(super) fn new(events_tx: MpscChannelProducer<Event>, filter: DeviceFilter) -> Self {
+        pub(super) fn new(
+            events_tx: MpscChannelProducer<Event>,
+            filter: DeviceFilter,
+            label_store: Rc<DeviceLabelStore>,
+        ) -> Self {
             Self {
                 events_tx,
                 filter: Rc::new(filter),
+                label_store,
             }
         }
 
         pub async fn run(self) -> Result<(), Report> {
+            let label_store = self.label_store.clone();
+
             // Enumerate existing devices and spawn tasks for each
             let devices = discovery::find_devices(&self.filter)
                 .context("Failed to enumerate input devices")?;
-            for device in devices {
+            for (device, label) in devices {
                 spawn_local(run_device(
                     InputDevice::Enumerated(device),
+                    label,
+                    label_store.clone(),
                     self.events_tx.clone(),
                 ));
             }
@@ -87,13 +103,18 @@ pub mod driver {
             while let Some(result) = monitor.next().await {
                 match result {
                     Ok(event) => {
-                        if event.event_type() == udev::EventType::Add && self.filter.matches(&event)
-                        {
-                            spawn_local(run_device(
-                                InputDevice::HotPlugged(event),
-                                self.events_tx.clone(),
-                            ));
+                        if event.event_type() != udev::EventType::Add {
+                            continue;
                         }
+                        let Some(label) = self.filter.matches(&event) else {
+                            continue;
+                        };
+                        spawn_local(run_device(
+                            InputDevice::HotPlugged(event),
+                            label,
+                            label_store.clone(),
+                            self.events_tx.clone(),
+                        ));
                     }
                     Err(error) => {
                         log::warn!("udev monitor error: {error}");
@@ -122,9 +143,15 @@ pub mod driver {
         }
     }
 
-    async fn run_device(device: InputDevice, tx: MpscChannelProducer<Event>) {
+    async fn run_device(
+        device: InputDevice,
+        label: DeviceLabel,
+        label_store: Rc<DeviceLabelStore>,
+        tx: MpscChannelProducer<Event>,
+    ) {
+        let label_str = label_store.resolve(label);
         let Some(devnode) = device.devnode() else {
-            log::warn!("device has no devnode, skipping");
+            log::warn!("[{label_str}] device has no devnode, skipping");
             return;
         };
 
@@ -135,6 +162,7 @@ pub mod driver {
                     "{}",
                     report!(error)
                         .context("Failed to open device")
+                        .attach(format!("label: {label_str}"))
                         .attach(format!("devnode: {}", devnode.display()))
                 );
                 return;
@@ -146,31 +174,34 @@ pub mod driver {
 
         let evdev_device = stream.device();
         log::info!(
-            "attached: {}\n  name: {}\n  physical path: {}",
+            "attached [{label_str}]: {}\n  name: {}\n  physical path: {}",
             devnode.display(),
             evdev_device.name().unwrap_or("unknown"),
             evdev_device.physical_path().unwrap_or("unknown"),
         );
-        match stream_device_events(stream, tx).await {
+        match stream_device_events(stream, label, tx).await {
             Ok(()) => {
                 log::info!(
-                    "finished streaming events for removed device {}",
+                    "finished streaming events for removed device [{label_str}] {}",
                     devnode.display()
                 );
             }
             Err(report) => {
                 log::warn!(
                     "{}",
-                    report.attach(format!("devnode: {}", devnode.display()))
+                    report
+                        .attach(format!("label: {label_str}"))
+                        .attach(format!("devnode: {}", devnode.display()))
                 );
             }
         }
 
-        log::info!("detached: {}", devnode.display());
+        log::info!("detached [{label_str}]: {}", devnode.display());
     }
 
     async fn stream_device_events(
         stream: EventStream,
+        label: DeviceLabel,
         tx: MpscChannelProducer<Event>,
     ) -> Result<(), Report> {
         enum StreamError {
@@ -178,7 +209,7 @@ pub mod driver {
             Channel,
         }
 
-        let result = translate_event_stream(stream)
+        let result = translate_event_stream(stream, label)
             .map_err(StreamError::Device)
             .forward(tx.into_sink().sink_map_err(|_| StreamError::Channel))
             .await;
