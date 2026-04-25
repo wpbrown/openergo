@@ -2,7 +2,9 @@ use bachelor::broadcast::spmc::SpmcBroadcastProducer;
 use futures::StreamExt;
 use futures::future::{Either, select};
 use rootcause::prelude::*;
-use shared::protocol::{ClientCodec, ServerMessage, UsageIncrement};
+use shared::protocol::{
+    ClientCodec, PROTOCOL_VERSION, ServerMessage, UsageIncrement, read_protocol_version,
+};
 use std::path::PathBuf;
 use std::pin::{Pin, pin};
 use std::time::Duration;
@@ -36,8 +38,27 @@ pub async fn reconnect_loop(
             }
         };
 
-        if let Some(stream) = stream {
+        if let Some(mut stream) = stream {
             log::info!("Connected to server");
+            match read_protocol_version(&mut stream).await {
+                Ok(None) => {}
+                Ok(Some(peer)) => {
+                    return Err(report!(
+                        "protocol version mismatch: server={peer}, client={PROTOCOL_VERSION}"
+                    ));
+                }
+                Err(e) => {
+                    log::error!("Failed to read protocol version: {e}");
+                    if timeout(Duration::from_secs(1), ctrl_c.as_mut())
+                        .await
+                        .is_ok()
+                    {
+                        log::info!("shutting down");
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
             let mut framed = Framed::new(stream, ClientCodec::default()).fuse();
             let shutdown = handle_connection(
                 &mut framed,

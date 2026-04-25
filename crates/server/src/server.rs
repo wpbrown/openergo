@@ -12,7 +12,9 @@ use futures::pin_mut;
 use futures::{SinkExt, StreamExt};
 use shared::codec::PostcardCodec;
 use shared::model::UsageSnapshot;
-use shared::protocol::{Command, DwellServerConfig, ServerMessage, UsageIncrement};
+use shared::protocol::{
+    Command, DwellServerConfig, ServerMessage, UsageIncrement, write_protocol_version,
+};
 use std::io;
 use std::num::NonZeroUsize;
 use tokio::net::{UnixListener, UnixStream};
@@ -108,12 +110,17 @@ async fn wait_client_event(
 }
 
 async fn handle_client(
-    stream: UnixStream,
+    mut stream: UnixStream,
     mut usage_rx: MpmcWatchRefConsumer<UsageSnapshot>,
     mut click_rx: Option<bachelor::signal::mpmc_latched::MpmcLatchedSignalConsumer>,
     cmd_tx: MpscChannelProducer<ClientCommand>,
 ) {
     use jiff::Timestamp;
+
+    if let Err(e) = write_protocol_version(&mut stream).await {
+        log::debug!("Failed to send protocol version: {e}");
+        return;
+    }
 
     let codec: PostcardCodec<Command, ServerMessage> = PostcardCodec::default();
     let mut framed = Framed::new(stream, codec);

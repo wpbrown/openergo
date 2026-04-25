@@ -2,7 +2,27 @@ use crate::codec::PostcardCodec;
 use crate::model::UsageDelta;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use std::io;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// Wire-format protocol version. Bump on any incompatible change to
+/// `Command`, `ServerMessage`, or framing.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Send the protocol version to the peer.
+pub async fn write_protocol_version<W: AsyncWriteExt + Unpin>(w: &mut W) -> io::Result<()> {
+    w.write_all(&PROTOCOL_VERSION.to_ne_bytes()).await
+}
+
+/// Read the peer's protocol version. Returns `None` if it matches ours,
+/// or `Some(peer_version)` if it does not.
+pub async fn read_protocol_version<R: AsyncReadExt + Unpin>(r: &mut R) -> io::Result<Option<u32>> {
+    let mut buf = [0u8; 4];
+    r.read_exact(&mut buf).await?;
+    let peer = u32::from_ne_bytes(buf);
+    Ok((peer != PROTOCOL_VERSION).then_some(peer))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageIncrement {

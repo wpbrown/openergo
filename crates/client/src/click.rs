@@ -10,8 +10,9 @@ pub struct ClickHandler {
 
 impl ClickHandler {
     pub fn new() -> Result<Self, Report> {
-        let sink =
+        let mut sink =
             rodio::DeviceSinkBuilder::open_default_sink().context("Failed to open audio output")?;
+        sink.log_on_drop(false);
         Ok(Self { sink })
     }
 
