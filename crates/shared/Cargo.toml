@@ -11,7 +11,7 @@ postcard = { version = "1", features = ["alloc", "use-std"] }
 serde = { version = "1", features = ["derive"] }
 slab = "0.4"
 tokio-util = { version = "0.7", features = ["codec"] }
-tokio = { version = "1", features = ["net", "io-util"] }
+tokio = { version = "1", features = ["net", "io-util", "rt"] }
 nix = { version = "0.30.1", features = ["time"] }
 jiff = { version = "0.2.17", features = ["serde"] }
 serde_with = "3.16.1"

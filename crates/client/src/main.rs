@@ -1,12 +1,15 @@
+use crate::usage::breaks::BreakState;
+use crate::usage::daily::DayState;
 use crate::usage::rest::RestState;
 use bachelor::broadcast::spmc::broadcast;
+use bachelor::signal::mpmc_latched;
 use clap::Parser;
-use futures::future::{Either, select};
+use futures::FutureExt;
 use rootcause::prelude::*;
+use shared::spawn::{JoinHandle, oe_spawn};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::pin::pin;
-use tokio::task::spawn_local;
 
 mod click;
 mod client;
@@ -65,6 +68,26 @@ async fn run(args: Args) -> Result<(), Report> {
 
     log::info!("Using socket path: {}", args.server_socket_path.display());
 
+    // Shutdown signal: any task that wants to know when to stop subscribes.
+    // Install handlers synchronously (the `signal()` builder registers them
+    // immediately, unlike `ctrl_c()` which only registers on first poll).
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("Failed to install SIGINT handler")?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("Failed to install SIGTERM handler")?;
+    let (shutdown_tx, shutdown_source) = mpmc_latched::signal();
+    oe_spawn(async move {
+        match futures::future::select(pin!(sigint.recv()), pin!(sigterm.recv())).await {
+            futures::future::Either::Left(_) => {
+                log::info!("SIGINT received, broadcasting shutdown")
+            }
+            futures::future::Either::Right(_) => {
+                log::info!("SIGTERM received, broadcasting shutdown")
+            }
+        }
+        shutdown_tx.notify();
+    });
+
     const USAGE_BROADCAST_CAPACITY: NonZeroUsize =
         NonZeroUsize::new(16).expect("broadcast capacity must be non-zero");
 
@@ -76,34 +99,67 @@ async fn run(args: Args) -> Result<(), Report> {
         RestState::default(),
         usage::StartupGap::default(),
     );
-    let rest_task = spawn_local(rest_driver);
+    let rest_task = oe_spawn(rest_driver);
+
+    // Breaks driver
+    let (_break_state, break_driver) = usage::breaks::create(
+        usage_source.subscribe(),
+        BreakState::default(),
+        usage::StartupGap::default(),
+    );
+    let break_task = oe_spawn(break_driver);
+
+    // Daily driver
+    let (_day_state, daily_driver) =
+        usage::daily::create(usage_source.subscribe(), DayState::default());
+    let daily_task = oe_spawn(daily_driver);
 
     // All-time usage driver
     let (all_usage_source, all_usage_driver) =
         usage::all::create(usage_source.subscribe(), Default::default());
-    let all_usage_task = spawn_local(all_usage_driver);
+    let all_usage_task = oe_spawn(all_usage_driver.map(|()| Ok(())));
 
     // Telemetry driver (optional)
     if telemetry.is_some_and(|t| t.report_usage()) {
-        spawn_local(usage::all::telemetry::create(
+        oe_spawn(usage::all::telemetry::create(
             all_usage_source.subscribe_forward(),
         ));
     } else {
         log::info!("Usage telemetry reporting disabled");
     }
 
-    // Reconnect loop takes ownership of usage_producer. When it returns
-    // (on ctrl_c), the producer is dropped, closing the broadcast channel.
-    client::reconnect_loop(&args.server_socket_path, usage_producer).await?;
+    // Reconnect loop owns the usage_producer; when it returns the producer
+    // drops, closing the broadcast and letting the rest/break/all drivers
+    // exit cleanly.
+    let reconnect_task = oe_spawn(client::reconnect_loop(
+        args.server_socket_path.clone(),
+        usage_producer,
+        shutdown_source.subscribe(),
+    ));
 
-    // Drivers see Closed and exit their loops. If the rest driver
-    // returns an error, propagate it.
-    match select(pin!(rest_task), pin!(all_usage_task)).await {
-        Either::Left((Ok(result), _)) => result,
-        Either::Right((Ok(()), _)) => Ok(()),
-        // panic=abort: JoinError can only be a cancellation, not a panic
-        Either::Left((Err(e), _)) | Either::Right((Err(e), _)) => {
-            bail!("Driver task cancelled: {e}")
+    // Wait for all fallible tasks. Return the first error immediately.
+    // all_usage_driver is infallible and will exit on broadcast Closed.
+    await_fallible(vec![
+        reconnect_task,
+        rest_task,
+        break_task,
+        daily_task,
+        all_usage_task,
+    ])
+    .await
+}
+
+/// Awaits the given fallible tasks. Returns the first error encountered
+/// without waiting for the rest. Returns `Ok(())` only if every task
+/// completes successfully.
+async fn await_fallible(mut tasks: Vec<JoinHandle<Result<(), Report>>>) -> Result<(), Report> {
+    while !tasks.is_empty() {
+        let (result, _idx, remaining) = futures::future::select_all(tasks).await;
+        tasks = remaining;
+        match result {
+            Ok(()) => {}
+            Err(report) => return Err(report),
         }
     }
+    Ok(())
 }

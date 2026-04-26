@@ -1,4 +1,5 @@
 use bachelor::broadcast::spmc::SpmcBroadcastProducer;
+use bachelor::signal::mpmc_latched::MpmcLatchedSignalConsumer;
 use futures::StreamExt;
 use futures::future::{Either, select};
 use rootcause::prelude::*;
@@ -6,7 +7,7 @@ use shared::protocol::{
     ClientCodec, PROTOCOL_VERSION, ServerMessage, UsageIncrement, read_protocol_version,
 };
 use std::path::PathBuf;
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::time::timeout;
@@ -14,18 +15,25 @@ use tokio_util::codec::Framed;
 
 use crate::click::ClickHandler;
 
+/// Sleeps for `RECONNECT_DELAY` or returns early if shutdown is requested.
+/// Returns `true` if shutdown was requested.
+async fn sleep_or_shutdown(shutdown: &mut MpmcLatchedSignalConsumer) -> bool {
+    timeout(RECONNECT_DELAY, shutdown.observe()).await.is_ok()
+}
+
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+
 pub async fn reconnect_loop(
-    socket_path: &PathBuf,
+    socket_path: PathBuf,
     mut usage_producer: SpmcBroadcastProducer<UsageIncrement>,
+    mut shutdown: MpmcLatchedSignalConsumer,
 ) -> Result<(), Report> {
     let click_handler = ClickHandler::new()?;
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
 
     loop {
         let stream = {
-            let connect = UnixStream::connect(socket_path);
-            match select(pin!(connect), ctrl_c.as_mut()).await {
+            let connect = UnixStream::connect(&socket_path);
+            match select(pin!(connect), shutdown.observe()).await {
                 Either::Left((Ok(stream), _)) => Some(stream),
                 Either::Left((Err(e), _)) => {
                     log::debug!("Failed to connect: {e}");
@@ -49,10 +57,7 @@ pub async fn reconnect_loop(
                 }
                 Err(e) => {
                     log::error!("Failed to read protocol version: {e}");
-                    if timeout(Duration::from_secs(1), ctrl_c.as_mut())
-                        .await
-                        .is_ok()
-                    {
+                    if sleep_or_shutdown(&mut shutdown).await {
                         log::info!("shutting down");
                         return Ok(());
                     }
@@ -60,41 +65,40 @@ pub async fn reconnect_loop(
                 }
             }
             let mut framed = Framed::new(stream, ClientCodec::default()).fuse();
-            let shutdown = handle_connection(
+            let was_shutdown = handle_connection(
                 &mut framed,
                 &mut usage_producer,
                 &click_handler,
-                ctrl_c.as_mut(),
+                &mut shutdown,
             )
             .await;
             log::info!("Disconnected from server");
-            if shutdown {
+            if was_shutdown {
                 return Ok(());
             }
-        } else {
-            if timeout(Duration::from_secs(1), ctrl_c.as_mut())
-                .await
-                .is_ok()
-            {
-                log::info!("shutting down");
-                return Ok(());
-            }
+        }
+
+        // Whether we failed to connect or got disconnected, back off before
+        // retrying so a misbehaving server can't pin us in a tight loop.
+        if sleep_or_shutdown(&mut shutdown).await {
+            log::info!("shutting down");
+            return Ok(());
         }
     }
 }
 
 type FramedStream = futures::stream::Fuse<Framed<UnixStream, ClientCodec>>;
 
-/// Returns `true` if ctrl_c was received.
+/// Returns `true` if shutdown was requested.
 async fn handle_connection(
     framed: &mut FramedStream,
     usage_producer: &mut SpmcBroadcastProducer<UsageIncrement>,
     click_handler: &ClickHandler,
-    mut ctrl_c: Pin<&mut impl Future<Output = Result<(), std::io::Error>>>,
+    shutdown: &mut MpmcLatchedSignalConsumer,
 ) -> bool {
     loop {
         let next = framed.next();
-        let msg = match select(pin!(next), ctrl_c.as_mut()).await {
+        let msg = match select(pin!(next), shutdown.observe()).await {
             Either::Left((Some(msg), _)) => msg,
             Either::Left((None, _)) => return false,
             Either::Right(_) => {

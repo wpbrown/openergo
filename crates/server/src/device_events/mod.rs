@@ -51,11 +51,11 @@ pub mod driver {
     use futures::StreamExt;
     use futures::{SinkExt, TryStreamExt};
     use rootcause::prelude::*;
+    use shared::spawn::oe_spawn;
     use std::io;
     use std::ops::Deref;
     use std::path::PathBuf;
     use std::rc::Rc;
-    use tokio::task::spawn_local;
 
     pub struct Driver {
         events_tx: MpscChannelProducer<Event>,
@@ -83,7 +83,7 @@ pub mod driver {
             let devices = discovery::find_devices(&self.filter)
                 .context("Failed to enumerate input devices")?;
             for (device, label) in devices {
-                spawn_local(run_device(
+                oe_spawn(run_device(
                     InputDevice::Enumerated(device),
                     label,
                     label_store.clone(),
@@ -109,7 +109,7 @@ pub mod driver {
                         let Some(label) = self.filter.matches(&event) else {
                             continue;
                         };
-                        spawn_local(run_device(
+                        oe_spawn(run_device(
                             InputDevice::HotPlugged(event),
                             label,
                             label_store.clone(),

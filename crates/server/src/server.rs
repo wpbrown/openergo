@@ -15,6 +15,7 @@ use shared::model::UsageSnapshot;
 use shared::protocol::{
     Command, DwellServerConfig, ServerMessage, UsageIncrement, write_protocol_version,
 };
+use shared::spawn::oe_spawn;
 use std::io;
 use std::num::NonZeroUsize;
 use tokio::net::{UnixListener, UnixStream};
@@ -62,7 +63,7 @@ impl Server {
                     let usage_rx = self.usage_source.subscribe_forward();
                     let click_rx = self.click_events.as_ref().map(|ce| ce.subscribe_forward());
                     let cmd_tx = self.cmd_tx.clone();
-                    tokio::task::spawn_local(async move {
+                    oe_spawn(async move {
                         handle_client(stream, usage_rx, click_rx, cmd_tx).await;
                     });
                     log::info!("New client connected");

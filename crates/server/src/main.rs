@@ -6,12 +6,12 @@ use futures::future::{Either, select};
 use openergo_server::device_events::{DeviceFilter, DeviceLabelStore, DeviceMatcher};
 use openergo_server::{config, device_events, dwell_click, server, usage};
 use rootcause::prelude::*;
+use shared::spawn::oe_spawn;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
 use tokio::net::UnixListener;
-use tokio::task::spawn_local;
 
 const DEFAULT_SOCKET_PATH: &str = "/run/openergo.sock";
 const DEFAULT_SOCKET_MODE: u32 = 0o660;
@@ -156,15 +156,15 @@ async fn run(
 ) -> Result<(), Report> {
     // Device Events
     let (device_events, device_events_driver) = device_events::create(device_filter, label_store);
-    let device_events_task = spawn_local(device_events_driver.run());
+    let device_events_task = oe_spawn(device_events_driver.run());
 
     let (device_events_sink, device_events_source) = broadcast(EVENT_BROADCAST_CAPACITY);
-    spawn_local(device_events.map(Ok).forward(device_events_sink));
+    oe_spawn(device_events.map(Ok).forward(device_events_sink));
 
     // Dwell Click (optional)
     let (dwell_controller, click_events, dwell_task) = if dwell_click_enabled {
         let (controller, events, driver) = dwell_click::create(device_events_source.subscribe());
-        let task = spawn_local(driver.run());
+        let task = oe_spawn(driver.run());
         (Some(controller), Some(events), Some(task))
     } else {
         (None, None, None)
@@ -176,23 +176,23 @@ async fn run(
         usage_config,
         device_events_source.subscribe(),
     );
-    spawn_local(usage_driver.run());
+    oe_spawn(usage_driver.run());
 
     // IPC Server
     let (server_events, ipc_server) = server::create(listener, usage_events, click_events);
-    spawn_local(ipc_server.run());
+    oe_spawn(ipc_server.run());
 
     // Forward dwell click commands if enabled
     if let Some(dwell_controller) = dwell_controller {
-        spawn_local(forward_commands(server_events, dwell_controller));
+        oe_spawn(forward_commands(server_events, dwell_controller));
     }
 
     match dwell_task {
         Some(dwell_task) => match select(device_events_task, dwell_task).await {
-            Either::Left((result, _)) => result.expect("task panicked"),
-            Either::Right((result, _)) => result.expect("task panicked"),
+            Either::Left((result, _)) => result,
+            Either::Right((result, _)) => result,
         },
-        None => device_events_task.await.expect("task panicked"),
+        None => device_events_task.await,
     }
 }
 
