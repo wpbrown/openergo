@@ -2,14 +2,16 @@ use bachelor::{
     broadcast::spmc::SpmcBroadcastConsumer,
     watch::{MpmcWatchRefProducer, MpmcWatchRefSource, mpmc_watch},
 };
+use futures::future::{Either, select};
 use jiff::{Timestamp, Zoned, civil::Time, tz::TimeZone};
 use rootcause::prelude::*;
 use shared::{
     model::UsageSnapshot,
     protocol::UsageIncrement,
-    spawn::oe_spawn,
+    spawn::{JoinHandle, oe_spawn},
     time::timer::{RealtimeSleepEnd, RealtimeTimer},
 };
+use std::pin::pin;
 
 /// Time of day at which the daily usage counters reset.
 const RESET_TIME: Time = Time::constant(3, 0, 0, 0); // 3:00:00 AM
@@ -38,10 +40,11 @@ pub fn create(
     let (state_tx, state_source) = mpmc_watch(initial_state);
 
     // Accumulate activity into the day state on a separate task so the timer
-    // loop only deals with scheduling resets.
-    oe_spawn(accumulate(usage_rx, state_tx.clone()));
+    // loop only deals with scheduling resets. The run loop watches this
+    // handle so it shuts down once the broadcast closes.
+    let accumulate_task = oe_spawn(accumulate(usage_rx, state_tx.clone()));
 
-    (state_source, run(state_tx))
+    (state_source, run(state_tx, accumulate_task))
 }
 
 async fn accumulate(
@@ -62,7 +65,13 @@ async fn accumulate(
 /// Uses `CLOCK_REALTIME` so that the reset is anchored to the user's
 /// local clock. Handles system clock changes (e.g., NTP, DST) by
 /// recomputing the next target whenever the timer is cancelled.
-async fn run(state_tx: MpmcWatchRefProducer<DayState>) -> Result<(), Report> {
+///
+/// Exits when `accumulate_task` completes (which happens when the usage
+/// broadcast closes during shutdown).
+async fn run(
+    state_tx: MpmcWatchRefProducer<DayState>,
+    mut accumulate_task: JoinHandle<()>,
+) -> Result<(), Report> {
     let mut timer =
         RealtimeTimer::new().context("Failed to create realtime timer for daily driver")?;
 
@@ -95,14 +104,17 @@ async fn run(state_tx: MpmcWatchRefProducer<DayState>) -> Result<(), Report> {
             now.duration_until(&target),
         );
 
-        match timer
-            .sleep_until(target.timestamp())
-            .await
-            .context("Daily driver timer error")?
-        {
-            RealtimeSleepEnd::Completed => log::debug!("sleep until {} completed", target),
-            RealtimeSleepEnd::Cancelled => {
-                log::warn!("timer cancelled due to system clock change");
+        let sleep = timer.sleep_until(target.timestamp());
+        match select(pin!(sleep), &mut accumulate_task).await {
+            Either::Left((result, _)) => match result.context("Daily driver timer error")? {
+                RealtimeSleepEnd::Completed => log::debug!("sleep until {} completed", target),
+                RealtimeSleepEnd::Cancelled => {
+                    log::warn!("timer cancelled due to system clock change");
+                }
+            },
+            Either::Right(((), _)) => {
+                log::debug!("accumulate task exited, shutting down daily driver");
+                return Ok(());
             }
         }
     }
