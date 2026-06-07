@@ -1,0 +1,40 @@
+[package]
+name = "openergo-client"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alsa = "0.10"
+bachelor = { version = "0.1.1", features = ["stream", "sink"] }
+bitflags = "2"
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+futures = "0.3"
+itertools = "0.14"
+jiff = { version = "0.2", features = ["serde"] }
+libc = "0.2"
+litemap = "0.8"
+notify-rust = "4"
+opentelemetry = { version = "0.31", features = ["metrics", "futures"], default-features = false }
+opentelemetry_sdk = { version = "0.31", features = ["metrics", "experimental_metrics_periodicreader_with_async_runtime", "rt-tokio"], default-features = false }
+opentelemetry-otlp = { version = "0.31", features = ["metrics", "http-proto", "reqwest-client", "zstd-http"], default-features = false }
+rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
+rootcause = "0.12"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3.16.1"
+shared = { path = "../shared", features = ["systemd"] }
+tokio = { version = "1", features = ["fs", "net", "rt", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+toml = "0.8"
+tracing = "0.1"
+turso = "0.6.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[features]
+tokio-console = ["shared/tokio-console"]

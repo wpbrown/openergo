@@ -1,0 +1,164 @@
+use super::label::DeviceLabel;
+use std::path::{Path, PathBuf};
+use tracing::debug;
+
+/// Controls which udev devices are monitored.
+pub struct DeviceFilter {
+    auto_detect: bool,
+    auto_detect_label: DeviceLabel,
+    include: Vec<DeviceMatcher>,
+    exclude: Vec<DeviceMatcher>,
+}
+
+impl DeviceFilter {
+    pub fn new(
+        auto_detect: bool,
+        auto_detect_label: DeviceLabel,
+        include: Vec<DeviceMatcher>,
+        exclude: Vec<DeviceMatcher>,
+    ) -> Self {
+        Self {
+            auto_detect,
+            auto_detect_label,
+            include,
+            exclude,
+        }
+    }
+
+    /// Returns the [`DeviceLabel`] for a device that should be monitored, or
+    /// `None` if it should be filtered out. Auto-detected devices return the
+    /// filter's `auto_detect_label`; explicitly included devices return their
+    /// configured label.
+    pub fn matches(&self, device: &udev::Device) -> Option<DeviceLabel> {
+        debug!(
+            "Evaluating device: {} node: {:?}",
+            device.syspath().display(),
+            device.devnode().map(|n| n.display())
+        );
+        if device.devnode().is_none_or(|n| {
+            !n.file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f.starts_with("event"))
+        }) {
+            return None;
+        }
+        if self.exclude.iter().any(|m| matcher_matches(m, device)) {
+            return None;
+        }
+        if let Some(included) = self.include.iter().find(|m| matcher_matches(m, device)) {
+            return Some(included.label);
+        }
+        if self.auto_detect && is_input_device(device) {
+            return Some(self.auto_detect_label);
+        }
+        None
+    }
+}
+
+/// Discover input devices filtered by the given `DeviceFilter`. Each result
+/// is paired with the [`DeviceLabel`] that matched it.
+pub fn find_devices(filter: &DeviceFilter) -> std::io::Result<Vec<(udev::Device, DeviceLabel)>> {
+    let mut enumerator = udev::Enumerator::new()?;
+    enumerator.match_subsystem("input")?;
+    let devices: Vec<(udev::Device, DeviceLabel)> = enumerator
+        .scan_devices()?
+        .filter_map(|d| filter.matches(&d).map(|label| (d, label)))
+        .collect();
+    Ok(devices)
+}
+
+/// Returns `true` if the udev device is a keyboard, mouse, or touchpad.
+fn is_input_device(device: &udev::Device) -> bool {
+    has_property(device, "ID_INPUT_KEYBOARD")
+        || has_property(device, "ID_INPUT_MOUSE")
+        || has_property(device, "ID_INPUT_TOUCHPAD")
+}
+
+fn has_property(device: &udev::Device, name: &str) -> bool {
+    device.property_value(name).is_some_and(|v| v == "1")
+}
+
+/// Matches a device by path and/or udev properties. All specified fields must
+/// match (AND logic).
+pub struct DeviceMatcher {
+    /// Interned friendly label, used in logs and event tagging.
+    pub label: DeviceLabel,
+    pub path: Option<PathBuf>,
+    pub name: Option<String>,
+    pub model: Option<String>,
+    pub model_id: Option<String>,
+    pub vendor_id: Option<String>,
+    pub serial: Option<String>,
+    pub bus: Option<String>,
+}
+
+/// Check if a single `DeviceMatcher` matches the given udev device.
+/// All specified fields must match (AND logic).
+fn matcher_matches(matcher: &DeviceMatcher, device: &udev::Device) -> bool {
+    if let Some(path) = &matcher.path
+        && !path_matches(path, device)
+    {
+        return false;
+    }
+    if let Some(name) = &matcher.name
+        && !name_matches(device, name)
+    {
+        return false;
+    }
+    if let Some(model) = &matcher.model
+        && !property_eq(device, "ID_MODEL", model)
+    {
+        return false;
+    }
+    if let Some(model_id) = &matcher.model_id
+        && !property_eq(device, "ID_MODEL_ID", model_id)
+    {
+        return false;
+    }
+    if let Some(vendor_id) = &matcher.vendor_id
+        && !property_eq(device, "ID_VENDOR_ID", vendor_id)
+    {
+        return false;
+    }
+    if let Some(serial) = &matcher.serial
+        && !property_eq(device, "ID_SERIAL", serial)
+    {
+        return false;
+    }
+    if let Some(bus) = &matcher.bus
+        && !property_eq(device, "ID_BUS", bus)
+    {
+        return false;
+    }
+    true
+}
+
+/// Check if the configured path matches either DEVNAME or any DEVLINKS entry.
+fn path_matches(path: &Path, device: &udev::Device) -> bool {
+    if device.devnode().is_some_and(|n| n == path) {
+        return true;
+    }
+    // DEVLINKS is a space-separated list of symlink paths.
+    device
+        .property_value("DEVLINKS")
+        .and_then(|v| v.to_str())
+        .is_some_and(|links| links.split(' ').any(|link| Path::new(link) == path))
+}
+
+fn property_eq(device: &udev::Device, name: &str, expected: &str) -> bool {
+    device.property_value(name).is_some_and(|v| v == expected)
+}
+
+/// The NAME property lives on the parent `inputX` device, not on the `eventX`
+/// device itself, so we check both.
+fn name_matches(device: &udev::Device, expected: &str) -> bool {
+    if property_eq(device, "NAME", expected) {
+        return true;
+    }
+    let parent = device.parent();
+    parent
+        .as_ref()
+        .and_then(|p| p.property_value("NAME"))
+        .and_then(|n| n.to_str())
+        .is_some_and(|v| v.trim_matches('"') == expected)
+}
