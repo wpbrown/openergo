@@ -103,8 +103,7 @@ pub async fn run(
     let activity_runtime = activity_module.start(usage_runtime.sources().all().subscribe_forward());
 
     // pain tracking
-    let (pain_source, pain_producer, pain_task) =
-        pain_module.start(initial_pain, shutdown.signal());
+    let (pain_source, pain_live_source, pain_producer, pain_task) = pain_module.start(initial_pain);
 
     // integrations
     let pain_forwarder_task = (!pain_sources.is_empty())
@@ -152,7 +151,7 @@ pub async fn run(
     let ipc_server_task = modules::ipc_server::start(
         client_socket_path,
         usage_runtime.sources().clone(),
-        pain_source.clone(),
+        pain_live_source,
         credit_runtime.limit_source().clone(),
         shutdown.signal(),
     )?;
@@ -183,7 +182,6 @@ pub async fn run(
     let credit_tasks = credit_runtime.detach();
     let mut source_tasks = Vec::new();
     source_tasks.push(credit_tasks.limit_keepalive);
-    source_tasks.push(pain_task);
     source_tasks.push(server_link_task);
     source_tasks.extend(transport_tasks);
     source_tasks.push(ipc_server_task);
@@ -192,6 +190,7 @@ pub async fn run(
     transform_tasks.extend(usage_tasks);
     transform_tasks.push(credit_tasks.utilization);
     transform_tasks.push(activity_runtime.detach());
+    transform_tasks.push(pain_task);
     if let Some(task) = pain_forwarder_task {
         transform_tasks.push(task);
     }

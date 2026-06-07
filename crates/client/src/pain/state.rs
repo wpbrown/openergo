@@ -70,14 +70,9 @@ impl Default for PainLabelStore {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PainEntry {
     /// Debounced ratio used for downstream computation. Updated only by the
-    /// debounce task in [`crate::pain::create`] when [`live`] has been
+    /// debounce task in [`crate::pain::create`] when the live input has been
     /// quiescent for the debounce window.
     ratio: f64,
-    /// Latest raw value as reported by the producer (MIDI / CLI). Provides
-    /// instant feedback to UI consumers. Not persisted; on load it is
-    /// initialized to match `ratio` via [`PainState::initialize_live_from_ratio`].
-    #[serde(skip)]
-    live: f64,
     /// Timestamp of the last `ratio` commit.
     last_updated: Timestamp,
 }
@@ -85,10 +80,6 @@ pub struct PainEntry {
 impl PainEntry {
     pub fn ratio(&self) -> f64 {
         self.ratio
-    }
-
-    pub fn live(&self) -> f64 {
-        self.live
     }
 
     pub fn last_updated(&self) -> Timestamp {
@@ -102,40 +93,41 @@ pub struct PainState {
 }
 
 impl PainState {
-    /// Set the live value for `label`. The committed `ratio` is updated
-    /// asynchronously by the debounce task; for new entries `ratio`
-    /// initializes to `0.0` until the debounce window elapses.
-    pub fn set(&mut self, label: PainLabel, live: f64) {
+    /// Set the committed ratio for `label` and refresh `last_updated`.
+    /// Intended to be called only by the debounce task in
+    /// [`crate::pain::create`].
+    pub(super) fn commit(&mut self, label: PainLabel, ratio: f64) {
         if let Some(entry) = self.entries.get_mut(&label) {
-            entry.live = live;
+            entry.ratio = ratio;
+            entry.last_updated = Timestamp::now();
         } else {
             self.entries.insert(
                 label,
                 PainEntry {
-                    ratio: 0.0,
-                    live,
+                    ratio,
                     last_updated: Timestamp::now(),
                 },
             );
         }
     }
+}
 
-    /// Copy `live` over `ratio` for `label` and refresh `last_updated`.
-    /// Intended to be called only by the debounce task in
-    /// [`crate::pain::create`].
-    pub(super) fn commit(&mut self, label: PainLabel) {
-        if let Some(entry) = self.entries.get_mut(&label) {
-            entry.ratio = entry.live;
-            entry.last_updated = Timestamp::now();
-        }
+#[derive(Debug, Default, Clone)]
+pub struct PainLiveState {
+    pub entries: LiteMap<PainLabel, f64>,
+}
+
+impl PainLiveState {
+    pub fn from_committed(committed: &PainState) -> Self {
+        let entries = committed
+            .entries
+            .iter()
+            .map(|(label, entry)| (*label, entry.ratio()))
+            .collect();
+        Self { entries }
     }
 
-    /// After loading from persistence, initialize each entry's `live`
-    /// (which is not persisted and would otherwise default to `0.0`) to
-    /// match its `ratio`.
-    pub(crate) fn initialize_live_from_ratio(&mut self) {
-        for (_, entry) in self.entries.iter_mut() {
-            entry.live = entry.ratio;
-        }
+    pub fn set(&mut self, label: PainLabel, ratio: f64) {
+        self.entries.insert(label, ratio);
     }
 }

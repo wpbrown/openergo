@@ -154,17 +154,12 @@ impl AppSnapshotFile {
                 }
             }
         }
-        let mut pain = PainState { entries };
-        // `live` is `#[serde(skip)]` and defaults to 0.0 on load; seed it
-        // from `ratio` so consumers see the correct value before the next
-        // producer update.
-        pain.initialize_live_from_ratio();
         let snapshot = AppSnapshot {
             all: self.all,
             day: self.day,
             rest: self.rest,
             breaks: self.breaks,
-            pain,
+            pain: PainState { entries },
             utilization: self.utilization,
             activity: self.activity,
         };

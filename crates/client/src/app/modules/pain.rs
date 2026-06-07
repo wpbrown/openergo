@@ -1,12 +1,11 @@
 use super::super::config;
 use crate::integration::{AnalogIn, Binder, EndpointConfig, EndpointLabel, EndpointLabelStore};
 use crate::pain::{
-    self, PainBias, PainCatalog, PainLabel, PainLabelStore, PainProducer, PainSource,
-    PainSourceSpec, PainState,
+    self, PainBias, PainCatalog, PainLabel, PainLabelStore, PainLiveSource, PainProducer,
+    PainSource, PainSourceSpec, PainState,
 };
 use rootcause::prelude::*;
 use shared::oe_spawn;
-use shared::shutdown::ShutdownSignal;
 use shared::spawn::JoinHandle;
 
 /// Pre-startup view of the `[pain]` configuration: the resolved
@@ -46,17 +45,21 @@ impl PainModule {
 
     /// Spawn the pain debounce driver. Consumes the module: after
     /// `start` the catalog lives inside the returned [`PainSource`]
-    /// / [`PainProducer`] handles (shared via `Rc`). Returns the
+    /// / [`PainLiveSource`] / [`PainProducer`] handles (shared via `Rc`). Returns the
     /// spawned driver's join handle alongside the source/producer
     /// pair.
     pub fn start(
         self,
         initial: PainState,
-        shutdown: ShutdownSignal,
-    ) -> (PainSource, PainProducer, JoinHandle<Result<(), Report>>) {
-        let (source, producer, driver) = pain::create(self.catalog, initial, shutdown);
+    ) -> (
+        PainSource,
+        PainLiveSource,
+        PainProducer,
+        JoinHandle<Result<(), Report>>,
+    ) {
+        let (source, live_source, producer, driver) = pain::create(self.catalog, initial);
         let task = oe_spawn!("pain-driver", driver);
-        (source, producer, task)
+        (source, live_source, producer, task)
     }
 }
 

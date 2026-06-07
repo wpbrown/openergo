@@ -1,5 +1,5 @@
 use crate::credit::limit::CreditLimitSource;
-use crate::pain::PainSource;
+use crate::pain::PainLiveSource;
 use crate::server;
 use crate::usage::AllUsageSources;
 use futures::FutureExt;
@@ -17,7 +17,7 @@ use tracing::info;
 pub fn start(
     path: PathBuf,
     sources: AllUsageSources,
-    pain: PainSource,
+    pain: PainLiveSource,
     credit_limits: CreditLimitSource,
     shutdown: ShutdownSignal,
 ) -> Result<JoinHandle<Result<(), Report>>, Report> {

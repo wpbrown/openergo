@@ -35,7 +35,9 @@ async fn run(
                     label = producer.catalog().resolve(*label),
                     value, "forwarding",
                 );
-                producer.set(*label, value);
+                if producer.set(*label, value).is_err() {
+                    return Ok(());
+                }
             }
             Err(Closed) => {
                 analog_ins.swap_remove(fired_idx);

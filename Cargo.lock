@@ -2750,6 +2750,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "shared",
+ "smallvec",
  "tokio",
  "tokio-util",
  "toml",

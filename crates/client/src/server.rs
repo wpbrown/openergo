@@ -1,5 +1,5 @@
 use crate::credit::limit::{CreditLimitConsumer, CreditLimitSource};
-use crate::pain::{PainConsumer, PainSource};
+use crate::pain::{PainLiveConsumer, PainLiveSource};
 use crate::usage::{AllUsageConsumer, AllUsageSources, UsageSource};
 use bachelor::error::Closed;
 use futures::future::{Either, select};
@@ -17,7 +17,7 @@ use tracing::{debug, error, info};
 pub fn create(
     listener: UnixListener,
     sources: AllUsageSources,
-    pain_source: PainSource,
+    pain_source: PainLiveSource,
     credit_limits: CreditLimitSource,
 ) -> ClientServer {
     ClientServer {
@@ -31,7 +31,7 @@ pub fn create(
 pub struct ClientServer {
     listener: UnixListener,
     sources: AllUsageSources,
-    pain_source: PainSource,
+    pain_source: PainLiveSource,
     credit_limits: CreditLimitSource,
 }
 
@@ -73,7 +73,7 @@ impl ClientServer {
 async fn handle_listener(
     mut stream: UnixStream,
     mut sources: AllUsageConsumer,
-    mut pain: PainConsumer,
+    mut pain: PainLiveConsumer,
     mut limits: CreditLimitConsumer,
 ) {
     if let Err(e) = write_protocol_version(&mut stream, PROTOCOL_VERSION).await {
@@ -101,7 +101,7 @@ async fn handle_listener(
         state
             .entries
             .iter()
-            .map(|(label, entry)| (catalog.resolve(*label), entry.live()))
+            .map(|(label, ratio)| (catalog.resolve(*label), *ratio))
             .collect::<Vec<(&'static str, f64)>>()
     });
     let initial = [
@@ -160,9 +160,9 @@ async fn handle_listener(
                 state
                     .entries
                     .iter()
-                    .map(|(label, entry)| ClientMessage::Pain {
+                    .map(|(label, ratio)| ClientMessage::Pain {
                         label: CowStr::borrowed(catalog.resolve(*label)),
-                        ratio: entry.live(),
+                        ratio: *ratio,
                     })
                     .collect()
             }),
@@ -219,7 +219,7 @@ enum Outcome {
 /// loudly to log it.
 async fn next_outcome(
     sources: &mut AllUsageConsumer,
-    pain: &mut PainConsumer,
+    pain: &mut PainLiveConsumer,
     limits: &mut CreditLimitConsumer,
     framed: &mut Framed<UnixStream, ClientServerCodec>,
 ) -> Result<Outcome, Report> {
