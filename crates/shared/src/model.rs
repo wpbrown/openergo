@@ -3,56 +3,23 @@ use serde_with::{DurationNanoSeconds, serde_as};
 use std::ops::{Add, AddAssign, Mul, MulAssign};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KeyCount {
-    pub left: u64,
-    pub right: u64,
-    pub other: u64,
-}
-
-impl KeyCount {
-    pub fn total(self) -> u64 {
-        self.left + self.right + self.other
-    }
-
-    pub fn saturating_delta(self, previous: Self) -> Self {
-        Self {
-            left: self.left.saturating_sub(previous.left),
-            right: self.right.saturating_sub(previous.right),
-            other: self.other.saturating_sub(previous.other),
-        }
-    }
-}
-
-impl AddAssign<KeyCount> for KeyCount {
-    fn add_assign(&mut self, delta: KeyCount) {
-        self.left += delta.left;
-        self.right += delta.right;
-        self.other += delta.other;
-    }
-}
-
-impl Add<KeyCount> for KeyCount {
-    type Output = Self;
-
-    fn add(mut self, delta: KeyCount) -> Self {
-        self += delta;
-        self
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageDelta {
-    pub click_count: u64,
-    pub drag_duration: Duration,
-    pub key_count: KeyCount,
-    pub other_combo: u64,
-    pub cross_combo: u64,
-    pub scroll_count: u64,
-    pub left_modifier_duration: ModifierUsageDelta,
-    pub right_modifier_duration: ModifierUsageDelta,
+    pub left: HandUsageDelta,
+    pub right: HandUsageDelta,
+    pub unclassified_key_count: u64,
+    pub unclassified_key_combo: u64,
     /// Time the user was generating usage-tracked input during this delta.
     pub active_duration: Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct HandUsageDelta {
+    pub click_count: u64,
+    pub drag_duration: Duration,
+    pub key_count: u64,
+    pub scroll_count: u64,
+    pub modifier: ModifierUsageDelta,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -62,19 +29,15 @@ pub struct ModifierUsageDelta {
     pub alt: Duration,
     pub meta: Duration,
     pub multi: Duration,
-    pub combo: u64,
+    pub same_hand_combo: u64,
 }
 
 impl AddAssign<&UsageDelta> for UsageDelta {
     fn add_assign(&mut self, delta: &UsageDelta) {
-        self.click_count += delta.click_count;
-        self.drag_duration += delta.drag_duration;
-        self.key_count += delta.key_count;
-        self.other_combo += delta.other_combo;
-        self.cross_combo += delta.cross_combo;
-        self.scroll_count += delta.scroll_count;
-        self.left_modifier_duration += &delta.left_modifier_duration;
-        self.right_modifier_duration += &delta.right_modifier_duration;
+        self.left += &delta.left;
+        self.right += &delta.right;
+        self.unclassified_key_count += delta.unclassified_key_count;
+        self.unclassified_key_combo += delta.unclassified_key_combo;
         self.active_duration += delta.active_duration;
     }
 }
@@ -91,16 +54,35 @@ impl Add<&UsageDelta> for UsageDelta {
 impl UsageDelta {
     /// Count every non-modifier key event represented by this delta.
     ///
-    /// Combo counters are mutually exclusive with `key_count` on the server,
-    /// so callers that need the keyboard-event aggregate should use this
-    /// instead of `key_count.total()`.
+    /// Key and combo buckets are mutually exclusive on the server, so callers
+    /// that need the physical keyboard-event aggregate should use this helper.
     pub fn key_event_count(&self) -> u64 {
-        self.key_count
-            .total()
-            .saturating_add(self.left_modifier_duration.combo)
-            .saturating_add(self.right_modifier_duration.combo)
-            .saturating_add(self.cross_combo)
-            .saturating_add(self.other_combo)
+        self.left
+            .key_count
+            .saturating_add(self.right.key_count)
+            .saturating_add(self.left.modifier.same_hand_combo)
+            .saturating_add(self.right.modifier.same_hand_combo)
+            .saturating_add(self.unclassified_key_count)
+            .saturating_add(self.unclassified_key_combo)
+    }
+}
+
+impl AddAssign<&HandUsageDelta> for HandUsageDelta {
+    fn add_assign(&mut self, delta: &HandUsageDelta) {
+        self.click_count += delta.click_count;
+        self.drag_duration += delta.drag_duration;
+        self.key_count += delta.key_count;
+        self.scroll_count += delta.scroll_count;
+        self.modifier += &delta.modifier;
+    }
+}
+
+impl Add<&HandUsageDelta> for HandUsageDelta {
+    type Output = Self;
+
+    fn add(mut self, delta: &HandUsageDelta) -> Self {
+        self += delta;
+        self
     }
 }
 
@@ -111,7 +93,7 @@ impl AddAssign<&ModifierUsageDelta> for ModifierUsageDelta {
         self.alt += delta.alt;
         self.meta += delta.meta;
         self.multi += delta.multi;
-        self.combo += delta.combo;
+        self.same_hand_combo += delta.same_hand_combo;
     }
 }
 
@@ -127,31 +109,20 @@ impl Add<&ModifierUsageDelta> for ModifierUsageDelta {
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageSnapshot {
-    pub click_count: u64,
-    #[serde_as(as = "DurationNanoSeconds<u64>")]
-    pub drag_duration: Duration,
-    pub key_count: KeyCount,
-    /// Other-hand key presses performed while any modifier was active.
-    pub other_combo: u64,
-    /// Opposite-hand key presses while only the opposite hand had a modifier.
-    pub cross_combo: u64,
-    pub scroll_count: u64,
-    pub left_modifier_duration: ModifierUsageSnapshot,
-    pub right_modifier_duration: ModifierUsageSnapshot,
+    pub left: HandUsageSnapshot,
+    pub right: HandUsageSnapshot,
+    pub unclassified_key_count: u64,
+    pub unclassified_key_combo: u64,
     #[serde_as(as = "DurationNanoSeconds<u64>")]
     pub active_duration: Duration,
 }
 
 impl AddAssign<&UsageDelta> for UsageSnapshot {
     fn add_assign(&mut self, delta: &UsageDelta) {
-        self.click_count += delta.click_count;
-        self.drag_duration += delta.drag_duration;
-        self.key_count += delta.key_count;
-        self.other_combo += delta.other_combo;
-        self.cross_combo += delta.cross_combo;
-        self.scroll_count += delta.scroll_count;
-        self.left_modifier_duration += &delta.left_modifier_duration;
-        self.right_modifier_duration += &delta.right_modifier_duration;
+        self.left += &delta.left;
+        self.right += &delta.right;
+        self.unclassified_key_count += delta.unclassified_key_count;
+        self.unclassified_key_combo += delta.unclassified_key_combo;
         self.active_duration += delta.active_duration;
     }
 }
@@ -168,21 +139,59 @@ impl Add<&UsageDelta> for UsageSnapshot {
 impl UsageSnapshot {
     pub fn saturating_delta(&self, previous: &UsageSnapshot) -> UsageDelta {
         UsageDelta {
-            click_count: self.click_count.saturating_sub(previous.click_count),
-            drag_duration: self.drag_duration.saturating_sub(previous.drag_duration),
-            key_count: self.key_count.saturating_delta(previous.key_count),
-            other_combo: self.other_combo.saturating_sub(previous.other_combo),
-            cross_combo: self.cross_combo.saturating_sub(previous.cross_combo),
-            scroll_count: self.scroll_count.saturating_sub(previous.scroll_count),
-            left_modifier_duration: self
-                .left_modifier_duration
-                .saturating_delta(&previous.left_modifier_duration),
-            right_modifier_duration: self
-                .right_modifier_duration
-                .saturating_delta(&previous.right_modifier_duration),
+            left: self.left.saturating_delta(&previous.left),
+            right: self.right.saturating_delta(&previous.right),
+            unclassified_key_count: self
+                .unclassified_key_count
+                .saturating_sub(previous.unclassified_key_count),
+            unclassified_key_combo: self
+                .unclassified_key_combo
+                .saturating_sub(previous.unclassified_key_combo),
             active_duration: self
                 .active_duration
                 .saturating_sub(previous.active_duration),
+        }
+    }
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct HandUsageSnapshot {
+    pub click_count: u64,
+    #[serde_as(as = "DurationNanoSeconds<u64>")]
+    pub drag_duration: Duration,
+    pub key_count: u64,
+    pub scroll_count: u64,
+    pub modifier: ModifierUsageSnapshot,
+}
+
+impl AddAssign<&HandUsageDelta> for HandUsageSnapshot {
+    fn add_assign(&mut self, delta: &HandUsageDelta) {
+        self.click_count += delta.click_count;
+        self.drag_duration += delta.drag_duration;
+        self.key_count += delta.key_count;
+        self.scroll_count += delta.scroll_count;
+        self.modifier += &delta.modifier;
+    }
+}
+
+impl Add<&HandUsageDelta> for HandUsageSnapshot {
+    type Output = Self;
+
+    fn add(mut self, delta: &HandUsageDelta) -> Self {
+        self += delta;
+        self
+    }
+}
+
+impl HandUsageSnapshot {
+    pub fn saturating_delta(&self, previous: &HandUsageSnapshot) -> HandUsageDelta {
+        HandUsageDelta {
+            click_count: self.click_count.saturating_sub(previous.click_count),
+            drag_duration: self.drag_duration.saturating_sub(previous.drag_duration),
+            key_count: self.key_count.saturating_sub(previous.key_count),
+            scroll_count: self.scroll_count.saturating_sub(previous.scroll_count),
+            modifier: self.modifier.saturating_delta(&previous.modifier),
         }
     }
 }
@@ -202,7 +211,7 @@ pub struct ModifierUsageSnapshot {
     #[serde_as(as = "DurationNanoSeconds<u64>")]
     pub multi: Duration,
     /// Same-hand non-modifier key presses while this hand held a modifier.
-    pub combo: u64,
+    pub same_hand_combo: u64,
 }
 
 impl AddAssign<&ModifierUsageDelta> for ModifierUsageSnapshot {
@@ -212,7 +221,7 @@ impl AddAssign<&ModifierUsageDelta> for ModifierUsageSnapshot {
         self.alt += delta.alt;
         self.meta += delta.meta;
         self.multi += delta.multi;
-        self.combo += delta.combo;
+        self.same_hand_combo += delta.same_hand_combo;
     }
 }
 
@@ -233,7 +242,9 @@ impl ModifierUsageSnapshot {
             alt: self.alt.saturating_sub(previous.alt),
             meta: self.meta.saturating_sub(previous.meta),
             multi: self.multi.saturating_sub(previous.multi),
-            combo: self.combo.saturating_sub(previous.combo),
+            same_hand_combo: self
+                .same_hand_combo
+                .saturating_sub(previous.same_hand_combo),
         }
     }
 }
@@ -324,38 +335,163 @@ mod tests {
     use super::*;
 
     #[test]
-    fn usage_snapshot_accumulates_and_diffs_new_combo_fields() {
+    fn usage_snapshot_accumulates_and_diffs_handed_usage_fields() {
         let previous = UsageSnapshot {
-            other_combo: 3,
-            cross_combo: 5,
-            left_modifier_duration: ModifierUsageSnapshot {
-                multi: Duration::from_millis(20),
-                combo: 7,
-                ..ModifierUsageSnapshot::default()
+            left: HandUsageSnapshot {
+                click_count: 3,
+                modifier: ModifierUsageSnapshot {
+                    multi: Duration::from_millis(20),
+                    same_hand_combo: 7,
+                    ..ModifierUsageSnapshot::default()
+                },
+                ..HandUsageSnapshot::default()
             },
+            right: HandUsageSnapshot {
+                scroll_count: 5,
+                ..HandUsageSnapshot::default()
+            },
+            unclassified_key_count: 11,
+            unclassified_key_combo: 13,
             ..UsageSnapshot::default()
         };
         let mut snapshot = previous.clone();
 
         snapshot += &UsageDelta {
-            other_combo: 2,
-            cross_combo: 4,
-            left_modifier_duration: ModifierUsageDelta {
-                multi: Duration::from_millis(30),
-                combo: 11,
-                ..ModifierUsageDelta::default()
+            left: HandUsageDelta {
+                click_count: 2,
+                modifier: ModifierUsageDelta {
+                    multi: Duration::from_millis(30),
+                    same_hand_combo: 17,
+                    ..ModifierUsageDelta::default()
+                },
+                ..HandUsageDelta::default()
             },
+            right: HandUsageDelta {
+                scroll_count: 4,
+                ..HandUsageDelta::default()
+            },
+            unclassified_key_count: 19,
+            unclassified_key_combo: 23,
             ..UsageDelta::default()
         };
 
         let delta = snapshot.saturating_delta(&previous);
-        assert_eq!(delta.other_combo, 2);
-        assert_eq!(delta.cross_combo, 4);
-        assert_eq!(
-            delta.left_modifier_duration.multi,
-            Duration::from_millis(30)
-        );
-        assert_eq!(delta.left_modifier_duration.combo, 11);
+        assert_eq!(delta.left.click_count, 2);
+        assert_eq!(delta.right.scroll_count, 4);
+        assert_eq!(delta.unclassified_key_count, 19);
+        assert_eq!(delta.unclassified_key_combo, 23);
+        assert_eq!(delta.left.modifier.multi, Duration::from_millis(30));
+        assert_eq!(delta.left.modifier.same_hand_combo, 17);
+    }
+
+    #[test]
+    fn key_event_count_includes_plain_combo_and_unclassified_buckets() {
+        let delta = UsageDelta {
+            left: HandUsageDelta {
+                key_count: 2,
+                modifier: ModifierUsageDelta {
+                    same_hand_combo: 3,
+                    ..ModifierUsageDelta::default()
+                },
+                ..HandUsageDelta::default()
+            },
+            right: HandUsageDelta {
+                key_count: 5,
+                modifier: ModifierUsageDelta {
+                    same_hand_combo: 7,
+                    ..ModifierUsageDelta::default()
+                },
+                ..HandUsageDelta::default()
+            },
+            unclassified_key_count: 11,
+            unclassified_key_combo: 13,
+            ..UsageDelta::default()
+        };
+
+        assert_eq!(delta.key_event_count(), 41);
+    }
+
+    #[test]
+    fn snapshot_delta_saturates_handed_usage_fields() {
+        let previous = UsageSnapshot {
+            left: HandUsageSnapshot {
+                key_count: 10,
+                modifier: ModifierUsageSnapshot {
+                    same_hand_combo: 5,
+                    shift: Duration::from_secs(3),
+                    ..ModifierUsageSnapshot::default()
+                },
+                ..HandUsageSnapshot::default()
+            },
+            unclassified_key_count: 8,
+            ..UsageSnapshot::default()
+        };
+        let snapshot = UsageSnapshot {
+            left: HandUsageSnapshot {
+                key_count: 4,
+                modifier: ModifierUsageSnapshot {
+                    same_hand_combo: 2,
+                    shift: Duration::from_secs(1),
+                    ..ModifierUsageSnapshot::default()
+                },
+                ..HandUsageSnapshot::default()
+            },
+            unclassified_key_count: 3,
+            ..UsageSnapshot::default()
+        };
+
+        let delta = snapshot.saturating_delta(&previous);
+        assert_eq!(delta.left.key_count, 0);
+        assert_eq!(delta.left.modifier.same_hand_combo, 0);
+        assert_eq!(delta.left.modifier.shift, Duration::ZERO);
+        assert_eq!(delta.unclassified_key_count, 0);
+    }
+
+    #[test]
+    fn modifier_usage_accumulates_same_hand_combo() {
+        let mut snapshot = ModifierUsageSnapshot {
+            same_hand_combo: 2,
+            shift: Duration::from_millis(10),
+            ..ModifierUsageSnapshot::default()
+        };
+
+        snapshot += &ModifierUsageDelta {
+            same_hand_combo: 3,
+            shift: Duration::from_millis(20),
+            ..ModifierUsageDelta::default()
+        };
+
+        assert_eq!(snapshot.same_hand_combo, 5);
+        assert_eq!(snapshot.shift, Duration::from_millis(30));
+    }
+
+    #[test]
+    fn hand_usage_snapshot_accumulates_and_diffs_modifier_usage() {
+        let previous = HandUsageSnapshot {
+            drag_duration: Duration::from_millis(10),
+            modifier: ModifierUsageSnapshot {
+                multi: Duration::from_millis(20),
+                same_hand_combo: 7,
+                ..ModifierUsageSnapshot::default()
+            },
+            ..HandUsageSnapshot::default()
+        };
+        let mut snapshot = previous;
+
+        snapshot += &HandUsageDelta {
+            drag_duration: Duration::from_millis(11),
+            modifier: ModifierUsageDelta {
+                multi: Duration::from_millis(30),
+                same_hand_combo: 13,
+                ..ModifierUsageDelta::default()
+            },
+            ..HandUsageDelta::default()
+        };
+
+        let delta = snapshot.saturating_delta(&previous);
+        assert_eq!(delta.drag_duration, Duration::from_millis(11));
+        assert_eq!(delta.modifier.multi, Duration::from_millis(30));
+        assert_eq!(delta.modifier.same_hand_combo, 13);
     }
 
     #[test]

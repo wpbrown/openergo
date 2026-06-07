@@ -140,66 +140,72 @@ fn usage_config_from_sources(
     label_store: &DeviceLabelStore,
 ) -> Result<usage::UsageConfig, Report> {
     let mut exclude = Vec::new();
-    let (exclude_labels, key_hand_section) = match section {
-        Some(config::UsageConfig { exclude, key_hand }) => (exclude.unwrap_or_default(), key_hand),
-        None => (Vec::new(), None),
+    let Some(config::UsageConfig {
+        exclude: exclude_labels,
+        default_pointer_hand,
+        devices,
+    }) = section
+    else {
+        bail!("missing [usage] section; usage.default_pointer_hand is required");
     };
 
-    for label in exclude_labels {
+    for label in exclude_labels.unwrap_or_default() {
         let resolved = resolve_usage_device_label(label_store, &label, "usage.exclude", "entry")?;
         if !exclude.contains(&resolved) {
             exclude.push(resolved);
         }
     }
 
-    let key_hand = key_hand_config_from_source(key_hand_section, label_store)?;
-    Ok(usage::UsageConfig { exclude, key_hand })
+    let default_pointer_hand = pointer_hand_from_config_value(default_pointer_hand);
+    let (key_hand, pointer_hand) =
+        usage_device_configs_from_source(devices, label_store, default_pointer_hand)?;
+    Ok(usage::UsageConfig {
+        exclude,
+        key_hand,
+        pointer_hand,
+    })
 }
 
-fn key_hand_config_from_source(
-    section: Option<config::KeyHandConfig>,
+fn usage_device_configs_from_source(
+    section: Option<HashMap<String, config::DeviceUsageConfig>>,
     label_store: &DeviceLabelStore,
-) -> Result<KeyHandUsageConfig, Report> {
-    let Some(config::KeyHandConfig {
-        profile,
-        overrides,
-        devices,
-    }) = section
-    else {
-        return Ok(KeyHandUsageConfig::default());
-    };
-
-    let mut default_profile =
-        key_hand_profile_from_config(profile.as_deref(), "usage.key_hand.profile")?;
-    default_profile =
-        apply_key_hand_overrides(default_profile, overrides, "usage.key_hand.overrides")?;
-
+    default_pointer_hand: usage::PointerHand,
+) -> Result<(KeyHandUsageConfig, usage::PointerHandUsageConfig), Report> {
     let mut device_profiles = Vec::new();
-    if let Some(devices) = devices {
+    let mut device_hands = Vec::new();
+    if let Some(devices) = section {
         for (label, device_config) in devices {
-            let resolved =
-                resolve_usage_device_label(label_store, &label, "usage.key_hand.devices", "key")?;
-            let config::DeviceKeyHandConfig { profile, overrides } = device_config;
-            let mut device_profile = match profile {
-                Some(profile) => parse_key_hand_profile(
-                    &profile,
-                    &format!("usage.key_hand.devices.{label}.profile"),
-                )?,
-                None => default_profile.clone(),
-            };
+            let resolved = resolve_usage_device_label(label_store, &label, "usage.devices", "key")?;
+            let config::DeviceUsageConfig {
+                hand,
+                key_profile,
+                key_overrides,
+            } = device_config;
+
+            if let Some(hand) = hand {
+                device_hands.push((resolved, pointer_hand_from_config_value(hand)));
+            }
+
+            let mut device_profile = key_hand_profile_for_device(hand, key_profile);
             device_profile = apply_key_hand_overrides(
                 device_profile,
-                overrides,
-                &format!("usage.key_hand.devices.{label}.overrides"),
+                key_overrides,
+                &format!("usage.devices.{label}.key_overrides"),
             )?;
             device_profiles.push((resolved, device_profile));
         }
     }
 
-    Ok(KeyHandUsageConfig {
-        default_profile,
-        device_profiles,
-    })
+    Ok((
+        KeyHandUsageConfig {
+            default_profile: KeyHandProfile::default(),
+            device_profiles,
+        },
+        usage::PointerHandUsageConfig {
+            default_hand: default_pointer_hand,
+            device_hands,
+        },
+    ))
 }
 
 fn resolve_usage_device_label(
@@ -211,40 +217,39 @@ fn resolve_usage_device_label(
     label_store.get(label).ok_or_else(|| {
         report!(
             "{section} {noun} {label:?} references unknown device label; \
-             it must be defined under [devices.include]"
+             it must be configured under [devices.include] or [devices.exclude]"
         )
     })
 }
 
-fn key_hand_profile_from_config(
-    profile: Option<&str>,
-    path: &str,
-) -> Result<KeyHandProfile, Report> {
-    Ok(profile
-        .map(|profile| parse_key_hand_profile(profile, path))
-        .transpose()?
-        .unwrap_or_default())
+fn key_hand_profile_for_device(
+    hand: Option<config::HandConfigValue>,
+    profile: Option<config::KeyProfileConfigValue>,
+) -> KeyHandProfile {
+    match profile {
+        Some(profile) => key_hand_profile_from_config(profile),
+        None => match hand {
+            Some(config::HandConfigValue::Left) => KeyHandProfile::Left,
+            Some(config::HandConfigValue::Right) => KeyHandProfile::Right,
+            None => KeyHandProfile::default(),
+        },
+    }
 }
 
-fn parse_key_hand_profile(profile: &str, path: &str) -> Result<KeyHandProfile, Report> {
+fn key_hand_profile_from_config(profile: config::KeyProfileConfigValue) -> KeyHandProfile {
     match profile {
-        "ansi_qwerty" => Ok(KeyHandProfile::UnclassifiedCustom(
-            KeyHandClassifier::ansi_qwerty(),
-        )),
-        "none" => Ok(KeyHandProfile::Unclassified),
-        "all_left" => Ok(KeyHandProfile::Left),
-        "all_right" => Ok(KeyHandProfile::Right),
-        other => {
-            bail!(
-                "{path} has unsupported value {other:?}; expected \"ansi_qwerty\", \"none\", \"all_left\", or \"all_right\""
-            )
+        config::KeyProfileConfigValue::AnsiQwerty => {
+            KeyHandProfile::UnclassifiedCustom(KeyHandClassifier::ansi_qwerty())
         }
+        config::KeyProfileConfigValue::None => KeyHandProfile::Unclassified,
+        config::KeyProfileConfigValue::AllLeft => KeyHandProfile::Left,
+        config::KeyProfileConfigValue::AllRight => KeyHandProfile::Right,
     }
 }
 
 fn apply_key_hand_overrides(
     profile: KeyHandProfile,
-    overrides: Option<HashMap<String, config::KeyHandOverrideValue>>,
+    overrides: Option<HashMap<String, config::KeyOverrideValue>>,
     path: &str,
 ) -> Result<KeyHandProfile, Report> {
     let Some(overrides) = overrides else {
@@ -278,11 +283,18 @@ fn apply_key_hand_overrides(
     })
 }
 
-fn key_hand_from_config_value(value: config::KeyHandOverrideValue) -> KeyHand {
+fn key_hand_from_config_value(value: config::KeyOverrideValue) -> KeyHand {
     match value {
-        config::KeyHandOverrideValue::Left => KeyHand::Left,
-        config::KeyHandOverrideValue::Right => KeyHand::Right,
-        config::KeyHandOverrideValue::Other => KeyHand::Unclassified,
+        config::KeyOverrideValue::Left => KeyHand::Left,
+        config::KeyOverrideValue::Right => KeyHand::Right,
+        config::KeyOverrideValue::Unclassified => KeyHand::Unclassified,
+    }
+}
+
+fn pointer_hand_from_config_value(value: config::HandConfigValue) -> usage::PointerHand {
+    match value {
+        config::HandConfigValue::Left => usage::PointerHand::Left,
+        config::HandConfigValue::Right => usage::PointerHand::Right,
     }
 }
 
@@ -526,6 +538,14 @@ mod listener {
 mod tests {
     use super::*;
 
+    fn minimal_usage_config() -> config::UsageConfig {
+        config::UsageConfig {
+            exclude: None,
+            default_pointer_hand: config::HandConfigValue::Right,
+            devices: None,
+        }
+    }
+
     #[test]
     fn cli_socket_path_overrides_config_socket_path() {
         let runtime = runtime_config_from_sources(
@@ -542,7 +562,7 @@ mod tests {
                 }),
                 dwell_click: None,
                 devices: None,
-                usage: None,
+                usage: Some(minimal_usage_config()),
             }),
         )
         .expect("runtime config should build");
@@ -568,7 +588,7 @@ mod tests {
                 }),
                 dwell_click: None,
                 devices: None,
-                usage: None,
+                usage: Some(minimal_usage_config()),
             }),
         )
         .expect("runtime config should build");
@@ -577,43 +597,52 @@ mod tests {
     }
 
     #[test]
-    fn key_hand_config_defaults_and_overrides_compile() {
+    fn usage_device_config_defaults_and_overrides_compile() {
         let mut labels = DeviceLabelStore::new();
         let main_keyboard = labels.get_or_intern("main_keyboard");
         let layer_pad = labels.get_or_intern("layer_pad");
+        let right_mouse = labels.get_or_intern("right_mouse");
 
         let usage_config = usage_config_from_sources(
             Some(config::UsageConfig {
                 exclude: None,
-                key_hand: Some(config::KeyHandConfig {
-                    profile: None,
-                    overrides: Some(HashMap::from([(
-                        "KEY_SPACE".to_string(),
-                        config::KeyHandOverrideValue::Left,
-                    )])),
-                    devices: Some(HashMap::from([
-                        (
-                            "main_keyboard".to_string(),
-                            config::DeviceKeyHandConfig {
-                                profile: None,
-                                overrides: Some(HashMap::from([(
-                                    "KEY_B".to_string(),
-                                    config::KeyHandOverrideValue::Right,
-                                )])),
-                            },
-                        ),
-                        (
-                            "layer_pad".to_string(),
-                            config::DeviceKeyHandConfig {
-                                profile: Some("none".to_string()),
-                                overrides: Some(HashMap::from([
-                                    ("KEY_F13".to_string(), config::KeyHandOverrideValue::Left),
-                                    ("KEY_F14".to_string(), config::KeyHandOverrideValue::Right),
-                                ])),
-                            },
-                        ),
-                    ])),
-                }),
+                default_pointer_hand: config::HandConfigValue::Right,
+                devices: Some(HashMap::from([
+                    (
+                        "main_keyboard".to_string(),
+                        config::DeviceUsageConfig {
+                            hand: None,
+                            key_profile: None,
+                            key_overrides: Some(HashMap::from([(
+                                "KEY_B".to_string(),
+                                config::KeyOverrideValue::Right,
+                            )])),
+                        },
+                    ),
+                    (
+                        "layer_pad".to_string(),
+                        config::DeviceUsageConfig {
+                            hand: Some(config::HandConfigValue::Left),
+                            key_profile: None,
+                            key_overrides: Some(HashMap::from([
+                                ("KEY_F13".to_string(), config::KeyOverrideValue::Left),
+                                ("KEY_F14".to_string(), config::KeyOverrideValue::Right),
+                                (
+                                    "KEY_F15".to_string(),
+                                    config::KeyOverrideValue::Unclassified,
+                                ),
+                            ])),
+                        },
+                    ),
+                    (
+                        "right_mouse".to_string(),
+                        config::DeviceUsageConfig {
+                            hand: Some(config::HandConfigValue::Right),
+                            key_profile: None,
+                            key_overrides: None,
+                        },
+                    ),
+                ])),
             }),
             &labels,
         )
@@ -626,51 +655,79 @@ mod tests {
                 .classify(KeyCode::KEY_B),
             KeyHand::Left
         );
-        assert_eq!(
-            usage_config
-                .key_hand
-                .default_profile
-                .classify(KeyCode::KEY_SPACE),
-            KeyHand::Left
-        );
 
         let main_profile = usage_config.key_hand.profile_for(main_keyboard);
-        assert_eq!(main_profile.classify(KeyCode::KEY_SPACE), KeyHand::Left);
         assert_eq!(main_profile.classify(KeyCode::KEY_B), KeyHand::Right);
 
         let layer_profile = usage_config.key_hand.profile_for(layer_pad);
-        assert_eq!(
-            layer_profile.classify(KeyCode::KEY_A),
-            KeyHand::Unclassified
-        );
+        assert_eq!(layer_profile.classify(KeyCode::KEY_A), KeyHand::Left);
         assert_eq!(layer_profile.classify(KeyCode::KEY_F13), KeyHand::Left);
         assert_eq!(layer_profile.classify(KeyCode::KEY_F14), KeyHand::Right);
+        assert_eq!(
+            layer_profile.classify(KeyCode::KEY_F15),
+            KeyHand::Unclassified
+        );
+
+        let right_mouse_profile = usage_config.key_hand.profile_for(right_mouse);
+        assert_eq!(
+            right_mouse_profile.classify(KeyCode::KEY_PLAYPAUSE),
+            KeyHand::Right
+        );
+        assert_eq!(
+            usage_config.pointer_hand.hand_for(layer_pad),
+            usage::PointerHand::Left
+        );
+        assert_eq!(
+            usage_config.pointer_hand.hand_for(main_keyboard),
+            usage::PointerHand::Right
+        );
     }
 
     #[test]
-    fn key_hand_config_accepts_builtin_profiles() {
+    fn usage_device_config_accepts_builtin_key_profiles() {
         for (profile, key, expected) in [
-            ("ansi_qwerty", KeyCode::KEY_A, KeyHand::Left),
-            ("none", KeyCode::KEY_A, KeyHand::Unclassified),
-            ("all_left", KeyCode::KEY_PLAYPAUSE, KeyHand::Left),
-            ("all_right", KeyCode::KEY_PLAYPAUSE, KeyHand::Right),
+            (
+                config::KeyProfileConfigValue::AnsiQwerty,
+                KeyCode::KEY_A,
+                KeyHand::Left,
+            ),
+            (
+                config::KeyProfileConfigValue::None,
+                KeyCode::KEY_A,
+                KeyHand::Unclassified,
+            ),
+            (
+                config::KeyProfileConfigValue::AllLeft,
+                KeyCode::KEY_PLAYPAUSE,
+                KeyHand::Left,
+            ),
+            (
+                config::KeyProfileConfigValue::AllRight,
+                KeyCode::KEY_PLAYPAUSE,
+                KeyHand::Right,
+            ),
         ] {
-            let labels = DeviceLabelStore::new();
+            let mut labels = DeviceLabelStore::new();
+            let label = labels.get_or_intern("device");
             let usage_config = usage_config_from_sources(
                 Some(config::UsageConfig {
                     exclude: None,
-                    key_hand: Some(config::KeyHandConfig {
-                        profile: Some(profile.to_string()),
-                        overrides: None,
-                        devices: None,
-                    }),
+                    default_pointer_hand: config::HandConfigValue::Right,
+                    devices: Some(HashMap::from([(
+                        "device".to_string(),
+                        config::DeviceUsageConfig {
+                            hand: None,
+                            key_profile: Some(profile),
+                            key_overrides: None,
+                        },
+                    )])),
                 }),
                 &labels,
             )
             .expect("usage config should compile");
 
             assert_eq!(
-                usage_config.key_hand.default_profile.classify(key),
+                usage_config.key_hand.profile_for(label).classify(key),
                 expected,
                 "profile {profile:?} classified {key:?} unexpectedly"
             );
@@ -678,39 +735,44 @@ mod tests {
     }
 
     #[test]
-    fn key_hand_overrides_on_constant_profiles_build_custom_map() {
+    fn key_overrides_on_constant_profiles_build_custom_map() {
         for (profile, default, override_value, override_hand) in [
             (
-                "all_left",
+                config::KeyProfileConfigValue::AllLeft,
                 KeyHand::Left,
-                config::KeyHandOverrideValue::Right,
+                config::KeyOverrideValue::Right,
                 KeyHand::Right,
             ),
             (
-                "all_right",
+                config::KeyProfileConfigValue::AllRight,
                 KeyHand::Right,
-                config::KeyHandOverrideValue::Left,
+                config::KeyOverrideValue::Left,
                 KeyHand::Left,
             ),
         ] {
-            let labels = DeviceLabelStore::new();
+            let mut labels = DeviceLabelStore::new();
+            let label = labels.get_or_intern("device");
             let usage_config = usage_config_from_sources(
                 Some(config::UsageConfig {
                     exclude: None,
-                    key_hand: Some(config::KeyHandConfig {
-                        profile: Some(profile.to_string()),
-                        overrides: Some(HashMap::from([
-                            ("KEY_A".to_string(), config::KeyHandOverrideValue::Other),
-                            ("KEY_J".to_string(), override_value),
-                        ])),
-                        devices: None,
-                    }),
+                    default_pointer_hand: config::HandConfigValue::Right,
+                    devices: Some(HashMap::from([(
+                        "device".to_string(),
+                        config::DeviceUsageConfig {
+                            hand: None,
+                            key_profile: Some(profile),
+                            key_overrides: Some(HashMap::from([
+                                ("KEY_A".to_string(), config::KeyOverrideValue::Unclassified),
+                                ("KEY_J".to_string(), override_value),
+                            ])),
+                        },
+                    )])),
                 }),
                 &labels,
             )
             .expect("usage config should compile");
 
-            let compiled_profile = &usage_config.key_hand.default_profile;
+            let compiled_profile = usage_config.key_hand.profile_for(label);
             assert_eq!(compiled_profile.classify(KeyCode::KEY_B), default);
             assert_eq!(compiled_profile.classify(KeyCode::KEY_PLAYPAUSE), default);
             assert_eq!(
@@ -722,47 +784,174 @@ mod tests {
     }
 
     #[test]
-    fn key_hand_device_override_requires_known_label() {
+    fn key_overrides_on_none_profile_build_custom_map() {
+        let mut labels = DeviceLabelStore::new();
+        let label = labels.get_or_intern("device");
+        let usage_config = usage_config_from_sources(
+            Some(config::UsageConfig {
+                exclude: None,
+                default_pointer_hand: config::HandConfigValue::Right,
+                devices: Some(HashMap::from([(
+                    "device".to_string(),
+                    config::DeviceUsageConfig {
+                        hand: None,
+                        key_profile: Some(config::KeyProfileConfigValue::None),
+                        key_overrides: Some(HashMap::from([
+                            ("KEY_F13".to_string(), config::KeyOverrideValue::Left),
+                            ("KEY_F14".to_string(), config::KeyOverrideValue::Right),
+                        ])),
+                    },
+                )])),
+            }),
+            &labels,
+        )
+        .expect("usage config should compile");
+
+        let compiled_profile = usage_config.key_hand.profile_for(label);
+        assert_eq!(
+            compiled_profile.classify(KeyCode::KEY_A),
+            KeyHand::Unclassified
+        );
+        assert_eq!(compiled_profile.classify(KeyCode::KEY_F13), KeyHand::Left);
+        assert_eq!(compiled_profile.classify(KeyCode::KEY_F14), KeyHand::Right);
+    }
+
+    #[test]
+    fn unclassified_override_clears_ansi_qwerty_key() {
+        let mut labels = DeviceLabelStore::new();
+        let label = labels.get_or_intern("keyboard");
+        let usage_config = usage_config_from_sources(
+            Some(config::UsageConfig {
+                exclude: None,
+                default_pointer_hand: config::HandConfigValue::Right,
+                devices: Some(HashMap::from([(
+                    "keyboard".to_string(),
+                    config::DeviceUsageConfig {
+                        hand: None,
+                        key_profile: Some(config::KeyProfileConfigValue::AnsiQwerty),
+                        key_overrides: Some(HashMap::from([(
+                            "KEY_A".to_string(),
+                            config::KeyOverrideValue::Unclassified,
+                        )])),
+                    },
+                )])),
+            }),
+            &labels,
+        )
+        .expect("usage config should compile");
+
+        let compiled_profile = usage_config.key_hand.profile_for(label);
+        assert_eq!(
+            compiled_profile.classify(KeyCode::KEY_A),
+            KeyHand::Unclassified
+        );
+        assert_eq!(compiled_profile.classify(KeyCode::KEY_S), KeyHand::Left);
+    }
+
+    #[test]
+    fn usage_device_config_requires_known_label() {
         let labels = DeviceLabelStore::new();
         let err = usage_config_from_sources(
             Some(config::UsageConfig {
                 exclude: None,
-                key_hand: Some(config::KeyHandConfig {
-                    profile: None,
-                    overrides: None,
-                    devices: Some(HashMap::from([(
-                        "missing".to_string(),
-                        config::DeviceKeyHandConfig {
-                            profile: Some("none".to_string()),
-                            overrides: None,
-                        },
-                    )])),
-                }),
+                default_pointer_hand: config::HandConfigValue::Right,
+                devices: Some(HashMap::from([(
+                    "missing".to_string(),
+                    config::DeviceUsageConfig {
+                        hand: None,
+                        key_profile: Some(config::KeyProfileConfigValue::None),
+                        key_overrides: None,
+                    },
+                )])),
             }),
             &labels,
         )
         .expect_err("unknown device override label should error");
 
         assert!(
-            format!("{err}").contains("usage.key_hand.devices"),
+            format!("{err}").contains("usage.devices"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn key_hand_override_key_must_be_known_evdev_key_code() {
+    fn usage_exclude_requires_known_label() {
         let labels = DeviceLabelStore::new();
         let err = usage_config_from_sources(
             Some(config::UsageConfig {
+                exclude: Some(vec!["missing".to_string()]),
+                default_pointer_hand: config::HandConfigValue::Right,
+                devices: None,
+            }),
+            &labels,
+        )
+        .expect_err("unknown usage exclude label should error");
+
+        assert!(
+            format!("{err}").contains("usage.exclude"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn excluded_but_known_device_config_is_accepted() {
+        let mut labels = DeviceLabelStore::new();
+        let ignored = labels.get_or_intern("ignored");
+        let usage_config = usage_config_from_sources(
+            Some(config::UsageConfig {
+                exclude: Some(vec!["ignored".to_string()]),
+                default_pointer_hand: config::HandConfigValue::Right,
+                devices: Some(HashMap::from([(
+                    "ignored".to_string(),
+                    config::DeviceUsageConfig {
+                        hand: Some(config::HandConfigValue::Left),
+                        key_profile: None,
+                        key_overrides: None,
+                    },
+                )])),
+            }),
+            &labels,
+        )
+        .expect("excluded but configured usage device should compile");
+
+        assert_eq!(usage_config.exclude, vec![ignored]);
+        assert_eq!(
+            usage_config.pointer_hand.hand_for(ignored),
+            usage::PointerHand::Left
+        );
+    }
+
+    #[test]
+    fn usage_config_requires_usage_section() {
+        let labels = DeviceLabelStore::new();
+        let err = usage_config_from_sources(None, &labels)
+            .expect_err("missing usage section should error");
+
+        assert!(
+            format!("{err}").contains("usage.default_pointer_hand"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn key_override_key_must_be_known_evdev_key_code() {
+        let mut labels = DeviceLabelStore::new();
+        labels.get_or_intern("device");
+        let err = usage_config_from_sources(
+            Some(config::UsageConfig {
                 exclude: None,
-                key_hand: Some(config::KeyHandConfig {
-                    profile: None,
-                    overrides: Some(HashMap::from([(
-                        "KEY_NOT_REAL".to_string(),
-                        config::KeyHandOverrideValue::Left,
-                    )])),
-                    devices: None,
-                }),
+                default_pointer_hand: config::HandConfigValue::Right,
+                devices: Some(HashMap::from([(
+                    "device".to_string(),
+                    config::DeviceUsageConfig {
+                        hand: None,
+                        key_profile: None,
+                        key_overrides: Some(HashMap::from([(
+                            "KEY_NOT_REAL".to_string(),
+                            config::KeyOverrideValue::Left,
+                        )])),
+                    },
+                )])),
             }),
             &labels,
         )

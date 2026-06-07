@@ -6,7 +6,7 @@ use std::time::Duration;
 
 /// Wire-format protocol version. Bump on any incompatible change to
 /// `Command`, `ServerMessage`, or framing.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageIncrement {
@@ -66,15 +66,19 @@ mod diag {
                 self.end.strftime("%H:%M:%S")
             )?;
 
-            write_count(f, "clicks", self.delta.click_count)?;
-            write_duration(f, "drag", self.delta.drag_duration)?;
-            write_count(f, "keys.l", self.delta.key_count.left)?;
-            write_count(f, "keys.r", self.delta.key_count.right)?;
-            write_count(f, "keys.o", self.delta.key_count.other)?;
-            write_count(f, "combo.o", self.delta.other_combo)?;
-            write_count(f, "combo.cross", self.delta.cross_combo)?;
-            write_count(f, "scroll", self.delta.scroll_count)?;
-            write_modifier_duration(
+            write_count(f, "click.l", self.delta.left.click_count)?;
+            write_count(f, "click.r", self.delta.right.click_count)?;
+            write_duration(f, "drag.l", self.delta.left.drag_duration)?;
+            write_duration(f, "drag.r", self.delta.right.drag_duration)?;
+            write_count(f, "keys.l", self.delta.left.key_count)?;
+            write_count(f, "keys.r", self.delta.right.key_count)?;
+            write_count(f, "keys.u", self.delta.unclassified_key_count)?;
+            write_count(f, "combo.l", self.delta.left.modifier.same_hand_combo)?;
+            write_count(f, "combo.r", self.delta.right.modifier.same_hand_combo)?;
+            write_count(f, "combo.u", self.delta.unclassified_key_combo)?;
+            write_count(f, "scroll.l", self.delta.left.scroll_count)?;
+            write_count(f, "scroll.r", self.delta.right.scroll_count)?;
+            write_modifier(
                 f,
                 [
                     "lmod.shift",
@@ -84,9 +88,9 @@ mod diag {
                     "lmod.multi",
                     "lmod.combo",
                 ],
-                self.delta.left_modifier_duration,
+                self.delta.left.modifier,
             )?;
-            write_modifier_duration(
+            write_modifier(
                 f,
                 [
                     "rmod.shift",
@@ -96,7 +100,7 @@ mod diag {
                     "rmod.multi",
                     "rmod.combo",
                 ],
-                self.delta.right_modifier_duration,
+                self.delta.right.modifier,
             )?;
             write_duration(f, "active", self.delta.active_duration)?;
 
@@ -119,7 +123,7 @@ mod diag {
         write_compact_duration(f, duration)
     }
 
-    fn write_modifier_duration(
+    fn write_modifier(
         f: &mut fmt::Formatter<'_>,
         labels: [&str; 6],
         duration: ModifierUsageDelta,
@@ -129,7 +133,7 @@ mod diag {
         write_duration(f, labels[2], duration.alt)?;
         write_duration(f, labels[3], duration.meta)?;
         write_duration(f, labels[4], duration.multi)?;
-        write_count(f, labels[5], duration.combo)
+        write_count(f, labels[5], duration.same_hand_combo)
     }
 
     fn write_compact_duration(f: &mut fmt::Formatter<'_>, duration: Duration) -> fmt::Result {
@@ -148,7 +152,7 @@ mod diag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{KeyCount, ModifierUsageDelta};
+    use crate::model::{HandUsageDelta, ModifierUsageDelta};
 
     fn ts(second: i64) -> Timestamp {
         Timestamp::from_second(second).expect("valid test timestamp")
@@ -158,26 +162,29 @@ mod tests {
     fn display_shows_only_non_zero_updates() {
         let increment = UsageIncrement::new(
             UsageDelta {
-                click_count: 2,
-                drag_duration: Duration::from_millis(3),
-                key_count: KeyCount {
-                    left: 1,
-                    right: 0,
-                    other: 4,
+                left: HandUsageDelta {
+                    click_count: 2,
+                    drag_duration: Duration::from_millis(3),
+                    key_count: 1,
+                    modifier: ModifierUsageDelta {
+                        shift: Duration::from_millis(5),
+                        multi: Duration::from_millis(8),
+                        same_hand_combo: 9,
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
-                other_combo: 6,
-                cross_combo: 7,
-                scroll_count: 0,
-                left_modifier_duration: ModifierUsageDelta {
-                    shift: Duration::from_millis(5),
-                    multi: Duration::from_millis(8),
-                    combo: 9,
-                    ..ModifierUsageDelta::default()
+                right: HandUsageDelta {
+                    click_count: 3,
+                    scroll_count: 4,
+                    modifier: ModifierUsageDelta {
+                        ctrl: Duration::from_micros(250),
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
-                right_modifier_duration: ModifierUsageDelta {
-                    ctrl: Duration::from_micros(250),
-                    ..ModifierUsageDelta::default()
-                },
+                unclassified_key_count: 5,
+                unclassified_key_combo: 6,
                 active_duration: Duration::from_secs(2),
             },
             ts(3661),
@@ -186,7 +193,7 @@ mod tests {
 
         assert_eq!(
             increment.to_string(),
-            "01:01:01-01:01:02 clicks=2 drag=3ms keys.l=1 keys.o=4 combo.o=6 combo.cross=7 lmod.shift=5ms lmod.multi=8ms lmod.combo=9 rmod.ctrl=250us active=2s"
+            "01:01:01-01:01:02 click.l=2 click.r=3 drag.l=3ms keys.l=1 keys.u=5 combo.l=9 combo.u=6 scroll.r=4 lmod.shift=5ms lmod.multi=8ms lmod.combo=9 rmod.ctrl=250us active=2s"
         );
     }
 

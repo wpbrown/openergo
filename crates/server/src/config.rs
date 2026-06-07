@@ -57,36 +57,46 @@ impl DevicesConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageConfig {
     /// Friendly device labels to ignore when computing usage. Each label must
-    /// already be defined under `[devices.include]`.
+    /// already be configured under `[devices.include]` or `[devices.exclude]`.
     pub exclude: Option<Vec<String>>,
-    pub key_hand: Option<KeyHandConfig>,
+    pub default_pointer_hand: HandConfigValue,
+    pub devices: Option<HashMap<String, DeviceUsageConfig>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct KeyHandConfig {
-    pub profile: Option<String>,
-    pub overrides: Option<HashMap<String, KeyHandOverrideValue>>,
-    pub devices: Option<HashMap<String, DeviceKeyHandConfig>>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceKeyHandConfig {
-    pub profile: Option<String>,
-    pub overrides: Option<HashMap<String, KeyHandOverrideValue>>,
+pub struct DeviceUsageConfig {
+    pub hand: Option<HandConfigValue>,
+    pub key_profile: Option<KeyProfileConfigValue>,
+    pub key_overrides: Option<HashMap<String, KeyOverrideValue>>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum KeyHandOverrideValue {
+pub enum HandConfigValue {
     Left,
     Right,
-    Other,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyProfileConfigValue {
+    AnsiQwerty,
+    None,
+    AllLeft,
+    AllRight,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyOverrideValue {
+    Left,
+    Right,
+    Unclassified,
 }
 
 /// Matches a device by path and/or udev properties. All specified fields must
@@ -186,13 +196,11 @@ impl Config {
                 }
             }
 
-            if let Some(key_hand) = &usage.key_hand
-                && let Some(devices) = &key_hand.devices
-            {
+            if let Some(devices) = &usage.devices {
                 for label in devices.keys() {
                     if !is_valid_label(label) {
                         bail!(
-                            "usage.key_hand.devices key {label:?} is not a valid label \
+                            "usage.devices key {label:?} is not a valid label \
                              (must be non-empty ASCII alphanumerics, '_' or '-')"
                         );
                     }
@@ -346,60 +354,127 @@ mod tests {
     }
 
     #[test]
-    fn usage_key_hand_config_parses() {
+    fn usage_devices_config_parses() {
         let config: Config = toml::from_str(
             r#"
-            [usage.key_hand]
-            profile = "ansi_qwerty"
+            [usage]
+            default_pointer_hand = "right"
 
-            [usage.key_hand.overrides]
+            [usage.devices.left_mouse]
+            hand = "left"
+
+            [usage.devices.main_keyboard]
+            key_profile = "ansi_qwerty"
+
+            [usage.devices.main_keyboard.key_overrides]
             KEY_SPACE = "left"
 
-            [usage.key_hand.devices.main_keyboard]
+            [usage.devices.layer_pad]
+            key_profile = "none"
 
-            [usage.key_hand.devices.main_keyboard.overrides]
-            KEY_B = "right"
+            [usage.devices.layer_pad.key_overrides]
+            KEY_F13 = "unclassified"
             "#,
         )
         .expect("config should parse");
 
-        let key_hand = config
+        let usage = config
             .usage
             .as_ref()
-            .and_then(|usage| usage.key_hand.as_ref())
-            .expect("key hand config should be present");
-        assert_eq!(key_hand.profile.as_deref(), Some("ansi_qwerty"));
+            .expect("usage config should be present");
+        assert_eq!(usage.default_pointer_hand, HandConfigValue::Right);
         assert_eq!(
-            key_hand
-                .overrides
-                .as_ref()
-                .and_then(|overrides| overrides.get("KEY_SPACE")),
-            Some(&KeyHandOverrideValue::Left)
-        );
-        assert!(
-            key_hand
+            usage
                 .devices
                 .as_ref()
-                .is_some_and(|devices| devices.contains_key("main_keyboard"))
+                .and_then(|devices| devices.get("left_mouse"))
+                .and_then(|device| device.hand),
+            Some(HandConfigValue::Left)
+        );
+        assert_eq!(
+            usage
+                .devices
+                .as_ref()
+                .and_then(|devices| devices.get("main_keyboard"))
+                .and_then(|device| device.key_overrides.as_ref())
+                .and_then(|overrides| overrides.get("KEY_SPACE")),
+            Some(&KeyOverrideValue::Left)
+        );
+        assert!(
+            usage
+                .devices
+                .as_ref()
+                .is_some_and(|devices| devices.contains_key("layer_pad"))
         );
         config.validate().expect("config should validate");
     }
 
     #[test]
-    fn usage_key_hand_device_label_syntax_is_validated() {
+    fn old_usage_key_hand_config_is_rejected() {
+        let result: Result<Config, _> = toml::from_str(
+            r#"
+            [usage]
+            default_pointer_hand = "right"
+
+            [usage.key_hand]
+            profile = "ansi_qwerty"
+            "#,
+        );
+
+        assert!(result.is_err(), "old usage.key_hand must be rejected");
+    }
+
+    #[test]
+    fn usage_without_default_pointer_hand_is_rejected() {
+        let result: Result<Config, _> = toml::from_str(
+            r#"
+            [usage]
+            exclude = []
+            "#,
+        );
+
+        assert!(
+            result.is_err(),
+            "usage.default_pointer_hand must be required"
+        );
+    }
+
+    #[test]
+    fn usage_devices_still_require_default_pointer_hand() {
+        let result: Result<Config, _> = toml::from_str(
+            r#"
+            [devices.include.left_mouse]
+            name = "Left Mouse"
+
+            [usage.devices.left_mouse]
+            hand = "left"
+            "#,
+        );
+
+        assert!(
+            result.is_err(),
+            "per-device hands must not make default_pointer_hand optional"
+        );
+    }
+
+    #[test]
+    fn usage_device_label_syntax_is_validated() {
         let config: Config = toml::from_str(
             r#"
-            [usage.key_hand.devices."bad label"]
-            profile = "none"
+            [usage]
+            default_pointer_hand = "right"
+
+            [usage.devices."bad label"]
+            key_profile = "none"
             "#,
         )
         .expect("config should parse");
 
         let err = config
             .validate()
-            .expect_err("invalid key-hand device label should error");
+            .expect_err("invalid usage device label should error");
         assert!(
-            format!("{err}").contains("usage.key_hand.devices"),
+            format!("{err}").contains("usage.devices"),
             "unexpected error: {err}"
         );
     }

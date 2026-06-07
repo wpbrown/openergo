@@ -11,7 +11,8 @@ use evdev::KeyCode;
 use futures::FutureExt;
 use futures::future::{Either, select};
 use key_hand::{KeyHand, KeyHandUsageConfig};
-use shared::model::{ModifierUsageSnapshot, UsageSnapshot};
+use shared::model::{HandUsageSnapshot, ModifierUsageSnapshot, UsageSnapshot};
+use smallvec::SmallVec;
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::time::Duration;
@@ -41,6 +42,29 @@ pub struct UsageConfig {
     /// overhead of a hash set.
     pub exclude: Vec<DeviceLabel>,
     pub key_hand: KeyHandUsageConfig,
+    pub pointer_hand: PointerHandUsageConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointerHand {
+    Left,
+    #[default]
+    Right,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PointerHandUsageConfig {
+    pub default_hand: PointerHand,
+    pub device_hands: Vec<(DeviceLabel, PointerHand)>,
+}
+
+impl PointerHandUsageConfig {
+    pub fn hand_for(&self, label: DeviceLabel) -> PointerHand {
+        self.device_hands
+            .iter()
+            .find_map(|(device_label, hand)| (*device_label == label).then_some(*hand))
+            .unwrap_or(self.default_hand)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -146,12 +170,16 @@ impl Driver {
         usage_tx: MpmcWatchRefProducer<UsageSnapshot>,
         activity_tx: MpmcLatchedSignalProducer,
     ) -> Self {
-        let UsageConfig { exclude, key_hand } = config;
+        let UsageConfig {
+            exclude,
+            key_hand,
+            pointer_hand,
+        } = config;
         Self {
             events_rx,
             usage_tx,
             activity_tx,
-            controller: Controller::new(drag, key_hand),
+            controller: Controller::new(drag, key_hand, pointer_hand),
             exclude,
             last_usage_event: None,
             last_publish: None,
@@ -311,6 +339,12 @@ impl DragTracker {
     }
 }
 
+struct ActiveDrag {
+    label: DeviceLabel,
+    hand: PointerHand,
+    tracker: DragTracker,
+}
+
 /// Tracks the start of the currently unaccounted modifier hold segment.
 struct ModifierTracker {
     last_accounted: Instant,
@@ -320,8 +354,9 @@ struct ModifierTracker {
 struct Controller {
     config: DragConfig,
     key_hand: KeyHandUsageConfig,
+    pointer_hand: PointerHandUsageConfig,
     snapshot: UsageSnapshot,
-    active_drag: Option<DragTracker>,
+    active_drags: SmallVec<[ActiveDrag; 2]>,
     left_shift: Option<ModifierTracker>,
     right_shift: Option<ModifierTracker>,
     left_ctrl: Option<ModifierTracker>,
@@ -335,12 +370,17 @@ struct Controller {
 }
 
 impl Controller {
-    fn new(config: DragConfig, key_hand: KeyHandUsageConfig) -> Self {
+    fn new(
+        config: DragConfig,
+        key_hand: KeyHandUsageConfig,
+        pointer_hand: PointerHandUsageConfig,
+    ) -> Self {
         Self {
             config,
             key_hand,
+            pointer_hand,
             snapshot: UsageSnapshot::default(),
-            active_drag: None,
+            active_drags: SmallVec::new(),
             left_shift: None,
             right_shift: None,
             left_ctrl: None,
@@ -369,9 +409,9 @@ impl Controller {
     }
 
     fn has_active_drag(&self) -> bool {
-        self.active_drag
-            .as_ref()
-            .is_some_and(|drag| drag.needs_accounting(&self.config))
+        self.active_drags
+            .iter()
+            .any(|drag| drag.tracker.needs_accounting(&self.config))
     }
 
     fn add_active_duration(&mut self, duration: Duration) {
@@ -380,11 +420,13 @@ impl Controller {
 
     fn handle_event(&mut self, event: &Event, now: Instant) -> bool {
         match event.kind {
-            EventKind::MouseMoveX(dx) => self.handle_mouse_move(dx, now),
-            EventKind::MouseMoveY(dy) => self.handle_mouse_move(dy, now),
-            EventKind::MousePress { button, state } => self.handle_mouse_button(button, state, now),
+            EventKind::MouseMoveX(dx) => self.handle_mouse_move(event.label, dx, now),
+            EventKind::MouseMoveY(dy) => self.handle_mouse_move(event.label, dy, now),
+            EventKind::MousePress { button, state } => {
+                self.handle_mouse_button(event.label, button, state, now)
+            }
             EventKind::KeyPress { key, state } => self.handle_key(event.label, key, state, now),
-            EventKind::MouseScrollNotch(value) => self.handle_mouse_scroll(value),
+            EventKind::MouseScrollNotch(value) => self.handle_mouse_scroll(event.label, value),
             EventKind::MouseScrollHiRes(_) => false,
         }
     }
@@ -416,13 +458,20 @@ impl Controller {
         self.active_modifier_count(side) > 0
     }
 
-    fn handle_mouse_move(&mut self, delta: i32, now: Instant) -> bool {
+    fn handle_mouse_move(&mut self, label: DeviceLabel, delta: i32, now: Instant) -> bool {
         let config = &self.config;
-        if let Some(ref mut drag) = self.active_drag {
-            drag.distance = drag.distance.saturating_add(delta.unsigned_abs());
-            let distance_ready = drag.distance >= config.min_distance;
+        if let Some(active_drag) = self
+            .active_drags
+            .iter_mut()
+            .find(|active_drag| active_drag.label == label)
+        {
+            active_drag.tracker.distance = active_drag
+                .tracker
+                .distance
+                .saturating_add(delta.unsigned_abs());
+            let distance_ready = active_drag.tracker.distance >= config.min_distance;
             if distance_ready {
-                drag.update_qualification(config, now);
+                active_drag.tracker.update_qualification(config, now);
             }
             return distance_ready;
         }
@@ -430,14 +479,17 @@ impl Controller {
         false
     }
 
-    fn handle_mouse_scroll(&mut self, value: i32) -> bool {
+    fn handle_mouse_scroll(&mut self, label: DeviceLabel, value: i32) -> bool {
         let ticks = u64::from(value.unsigned_abs());
-        self.snapshot.scroll_count = self.snapshot.scroll_count.saturating_add(ticks);
+        let hand = self.pointer_hand.hand_for(label);
+        let usage = self.hand_usage_mut(hand);
+        usage.scroll_count = usage.scroll_count.saturating_add(ticks);
         ticks > 0
     }
 
     fn handle_mouse_button(
         &mut self,
+        label: DeviceLabel,
         button: KeyCode,
         button_state: ButtonState,
         now: Instant,
@@ -446,34 +498,52 @@ impl Controller {
 
         match button_state {
             ButtonState::Down => {
-                if is_left_button && self.active_drag.is_none() {
-                    self.active_drag = Some(DragTracker {
-                        last_accounted: now,
-                        distance: 0,
-                        qualified: false,
+                if is_left_button
+                    && !self
+                        .active_drags
+                        .iter()
+                        .any(|active_drag| active_drag.label == label)
+                {
+                    self.active_drags.push(ActiveDrag {
+                        label,
+                        hand: self.pointer_hand.hand_for(label),
+                        tracker: DragTracker {
+                            last_accounted: now,
+                            distance: 0,
+                            qualified: false,
+                        },
                     });
                 }
 
                 false
             }
             ButtonState::Up => {
-                let was_drag = if is_left_button {
+                let click_hand = if is_left_button {
                     let config = &self.config;
-                    self.active_drag.take().is_some_and(|mut drag| {
-                        if drag.update_qualification(config, now) {
-                            self.snapshot.drag_duration +=
-                                now.saturating_duration_since(drag.last_accounted);
-                            true
+                    let active_drag = self
+                        .active_drags
+                        .iter()
+                        .position(|active_drag| active_drag.label == label)
+                        .map(|index| self.active_drags.remove(index));
+
+                    if let Some(mut active_drag) = active_drag {
+                        if active_drag.tracker.update_qualification(config, now) {
+                            self.hand_usage_mut(active_drag.hand).drag_duration +=
+                                now.saturating_duration_since(active_drag.tracker.last_accounted);
+                            None
                         } else {
-                            false
+                            Some(active_drag.hand)
                         }
-                    })
+                    } else {
+                        Some(self.pointer_hand.hand_for(label))
+                    }
                 } else {
-                    false
+                    Some(self.pointer_hand.hand_for(label))
                 };
 
-                if !was_drag {
-                    self.snapshot.click_count = self.snapshot.click_count.saturating_add(1);
+                if let Some(hand) = click_hand {
+                    let usage = self.hand_usage_mut(hand);
+                    usage.click_count = usage.click_count.saturating_add(1);
                 }
 
                 true
@@ -483,14 +553,17 @@ impl Controller {
 
     fn flush_active_drag(&mut self, publish_at: Instant) {
         let config = &self.config;
-        if let Some(drag) = &mut self.active_drag {
-            if !drag.update_qualification(config, publish_at) {
-                return;
+        for active_drag in &mut self.active_drags {
+            if !active_drag.tracker.update_qualification(config, publish_at) {
+                continue;
             }
 
-            let duration = publish_at.saturating_duration_since(drag.last_accounted);
-            drag.last_accounted = publish_at;
-            self.snapshot.drag_duration += duration;
+            let duration = publish_at.saturating_duration_since(active_drag.tracker.last_accounted);
+            active_drag.tracker.last_accounted = publish_at;
+            match active_drag.hand {
+                PointerHand::Left => self.snapshot.left.drag_duration += duration,
+                PointerHand::Right => self.snapshot.right.drag_duration += duration,
+            }
         }
     }
 
@@ -549,34 +622,49 @@ impl Controller {
     fn add_non_modifier_key(&mut self, label: DeviceLabel, key: KeyCode) {
         match self.key_hand.profile_for(label).classify(key) {
             KeyHand::Left if self.has_active_modifier_on(Side::Left) => {
-                self.snapshot.left_modifier_duration.combo =
-                    self.snapshot.left_modifier_duration.combo.saturating_add(1);
-            }
-            KeyHand::Left if self.has_active_modifier_on(Side::Right) => {
-                self.snapshot.cross_combo = self.snapshot.cross_combo.saturating_add(1);
-            }
-            KeyHand::Left => {
-                self.snapshot.key_count.left = self.snapshot.key_count.left.saturating_add(1);
-            }
-            KeyHand::Right if self.has_active_modifier_on(Side::Right) => {
-                self.snapshot.right_modifier_duration.combo = self
+                self.snapshot.left.modifier.same_hand_combo = self
                     .snapshot
-                    .right_modifier_duration
-                    .combo
+                    .left
+                    .modifier
+                    .same_hand_combo
                     .saturating_add(1);
             }
-            KeyHand::Right if self.has_active_modifier_on(Side::Left) => {
-                self.snapshot.cross_combo = self.snapshot.cross_combo.saturating_add(1);
+            KeyHand::Left => {
+                self.snapshot.left.key_count = self.snapshot.left.key_count.saturating_add(1);
+            }
+            KeyHand::Right if self.has_active_modifier_on(Side::Right) => {
+                self.snapshot.right.modifier.same_hand_combo = self
+                    .snapshot
+                    .right
+                    .modifier
+                    .same_hand_combo
+                    .saturating_add(1);
             }
             KeyHand::Right => {
-                self.snapshot.key_count.right = self.snapshot.key_count.right.saturating_add(1);
+                self.snapshot.right.key_count = self.snapshot.right.key_count.saturating_add(1);
             }
             KeyHand::Unclassified if self.has_active_modifiers() => {
-                self.snapshot.other_combo = self.snapshot.other_combo.saturating_add(1);
+                self.snapshot.unclassified_key_combo =
+                    self.snapshot.unclassified_key_combo.saturating_add(1);
             }
             KeyHand::Unclassified => {
-                self.snapshot.key_count.other = self.snapshot.key_count.other.saturating_add(1);
+                self.snapshot.unclassified_key_count =
+                    self.snapshot.unclassified_key_count.saturating_add(1);
             }
+        }
+    }
+
+    fn hand_usage_mut(&mut self, hand: PointerHand) -> &mut HandUsageSnapshot {
+        match hand {
+            PointerHand::Left => &mut self.snapshot.left,
+            PointerHand::Right => &mut self.snapshot.right,
+        }
+    }
+
+    fn modifier_usage_mut(&mut self, side: Side) -> &mut ModifierUsageSnapshot {
+        match side {
+            Side::Left => &mut self.snapshot.left.modifier,
+            Side::Right => &mut self.snapshot.right.modifier,
         }
     }
 
@@ -621,26 +709,15 @@ impl Controller {
     }
 
     fn add_multi_modifier_duration(&mut self, side: Side, duration: Duration) {
-        match side {
-            Side::Left => self.snapshot.left_modifier_duration.multi += duration,
-            Side::Right => self.snapshot.right_modifier_duration.multi += duration,
-        }
+        self.modifier_usage_mut(side).multi += duration;
     }
 
     fn add_left_modifier_duration(&mut self, modifier: Modifier, duration: Duration) {
-        Self::add_modifier_duration(
-            &mut self.snapshot.left_modifier_duration,
-            modifier,
-            duration,
-        );
+        Self::add_modifier_duration(self.modifier_usage_mut(Side::Left), modifier, duration);
     }
 
     fn add_right_modifier_duration(&mut self, modifier: Modifier, duration: Duration) {
-        Self::add_modifier_duration(
-            &mut self.snapshot.right_modifier_duration,
-            modifier,
-            duration,
-        );
+        Self::add_modifier_duration(self.modifier_usage_mut(Side::Right), modifier, duration);
     }
 
     fn add_modifier_duration(
