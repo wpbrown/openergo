@@ -1,6 +1,7 @@
 use crate::integration::{AnalogInProducer, AnalogOut, EndpointIo};
 use alsa::seq::{
-    Addr, ClientIter, EvCtrl, Event, EventType, PortCap, PortIter, PortSubscribe, PortType, Seq,
+    Addr, ClientIter, EvCtrl, EvNote, Event, EventType, PortCap, PortIter, PortSubscribe, PortType,
+    Seq,
 };
 use alsa::{Direction as AlsaDirection, PollDescriptors};
 use bachelor::error::Closed;
@@ -153,16 +154,17 @@ impl Stream for AsyncSeq {
     }
 }
 
-/// One configured device after binding: matching info + the per-(channel,
-/// number) dispatch table for incoming CCs and the set of currently
+/// One configured device after binding: matching info + the per-message,
+/// channel, and number dispatch table for incoming controls and the set of currently
 /// subscribed-and-sendable port addresses for outgoing CCs.
 struct DeviceState {
     device_key: String,
     port_match: Option<String>,
     client_match: Option<String>,
-    /// (channel, number) → AnalogInProducer (the label is kept for
-    /// trace context only).
-    cc_in: HashMap<(u8, u8), (&'static str, AnalogInProducer)>,
+    /// (message, channel, number) → AnalogInProducer. The label is kept
+    /// for trace context only. CC values are written directly; note-on
+    /// increments the value by one.
+    inputs: HashMap<(MidiMessage, u8, u8), (&'static str, AnalogInProducer)>,
     sendable_ports: HashSet<Addr>,
 }
 
@@ -201,45 +203,52 @@ pub async fn run(
     let mut outs: Vec<OutEntry> = Vec::new();
     for device_cfg in devices_cfg {
         let device_idx = devices.len();
-        let mut cc_in: HashMap<(u8, u8), (&'static str, AnalogInProducer)> = HashMap::new();
+        let mut inputs: HashMap<(MidiMessage, u8, u8), (&'static str, AnalogInProducer)> =
+            HashMap::new();
         for ctrl in device_cfg.controls {
-            match ctrl.message {
-                MidiMessage::Cc => {}
-                MidiMessage::Note => {
-                    warn!(
-                        "MIDI control '{}' has message=note; note inputs/outputs are not yet supported by AnalogIn/AnalogOut (skipping)",
-                        ctrl.label,
-                    );
-                    continue;
-                }
-            }
-
             let (input, output) = ctrl.endpoint.split();
             if let Some(producer) = input {
-                let key = (ctrl.channel, ctrl.number);
-                if let Some((prev_label, _)) = cc_in.insert(key, (ctrl.label, producer)) {
+                let key = (ctrl.message, ctrl.channel, ctrl.number);
+                if let Some((prev_label, _)) = inputs.insert(key, (ctrl.label, producer)) {
                     warn!(
-                        "MIDI device '{}': two `in` CCs share (channel={}, number={}); '{}' overwritten by '{}'",
-                        device_cfg.device_key, ctrl.channel, ctrl.number, prev_label, ctrl.label,
+                        "MIDI device '{}': two `in` {} controls share (channel={}, number={}); '{}' overwritten by '{}'",
+                        device_cfg.device_key,
+                        ctrl.message.as_str(),
+                        ctrl.channel,
+                        ctrl.number,
+                        prev_label,
+                        ctrl.label,
                     );
                 }
             }
-            if let Some(consumer) = output {
-                outs.push(OutEntry {
-                    device_idx,
-                    label: ctrl.label,
-                    channel: ctrl.channel,
-                    number: ctrl.number,
-                    consumer,
-                    open: true,
-                });
+            match ctrl.message {
+                MidiMessage::Cc => {
+                    if let Some(consumer) = output {
+                        outs.push(OutEntry {
+                            device_idx,
+                            label: ctrl.label,
+                            channel: ctrl.channel,
+                            number: ctrl.number,
+                            consumer,
+                            open: true,
+                        });
+                    }
+                }
+                MidiMessage::Note => {
+                    if output.is_some() {
+                        warn!(
+                            "MIDI control '{}' has message=note with an output endpoint; note outputs are not supported (skipping output)",
+                            ctrl.label,
+                        );
+                    }
+                }
             }
         }
         devices.push(DeviceState {
             device_key: device_cfg.device_key,
             port_match: device_cfg.port_match,
             client_match: device_cfg.client_match,
-            cc_in,
+            inputs,
             sendable_ports: HashSet::new(),
         });
     }
@@ -475,7 +484,9 @@ fn handle_event(
             };
             for &device_idx in device_indices {
                 let device = &devices[device_idx];
-                if let Some((label, producer)) = device.cc_in.get(&(ctrl.channel, number)) {
+                if let Some((label, producer)) =
+                    device.inputs.get(&(MidiMessage::Cc, ctrl.channel, number))
+                {
                     trace!(
                         "MIDI controller {} ch={} on port {}:{} -> control '{}' = {} (device '{}')",
                         ctrl.param,
@@ -487,6 +498,38 @@ fn handle_event(
                         device.device_key,
                     );
                     let _ = producer.set(value);
+                }
+            }
+        }
+        EventType::Noteon => {
+            let Some(note) = event.get_data::<EvNote>() else {
+                return;
+            };
+            if note.velocity == 0 {
+                return;
+            }
+            let source = event.get_source();
+            let Some(device_indices) = active_ports.get(&source) else {
+                return;
+            };
+            for &device_idx in device_indices {
+                let device = &devices[device_idx];
+                if let Some((label, producer)) =
+                    device
+                        .inputs
+                        .get(&(MidiMessage::Note, note.channel, note.note))
+                {
+                    trace!(
+                        "MIDI note-on {} ch={} vel={} on port {}:{} -> control '{}' += 1 (device '{}')",
+                        note.note,
+                        note.channel,
+                        note.velocity,
+                        source.client,
+                        source.port,
+                        label,
+                        device.device_key,
+                    );
+                    let _ = producer.update(|value| *value += 1.0);
                 }
             }
         }
@@ -691,10 +734,19 @@ fn try_subscribe(
         if sendable {
             device.sendable_ports.insert(source);
         }
-        let in_count = device.cc_in.len();
-        let in_labels: Vec<&str> = device.cc_in.values().map(|(label, _)| *label).collect();
+        let cc_count = device
+            .inputs
+            .keys()
+            .filter(|(message, _, _)| *message == MidiMessage::Cc)
+            .count();
+        let note_count = device
+            .inputs
+            .keys()
+            .filter(|(message, _, _)| *message == MidiMessage::Note)
+            .count();
+        let in_labels: Vec<&str> = device.inputs.values().map(|(label, _)| *label).collect();
         info!(
-            "Subscribed MIDI port {}:{} '{port_name}' (client '{client_name}') for device '{}' ({in_count} in: {})",
+            "Subscribed MIDI port {}:{} '{port_name}' (client '{client_name}') for device '{}' ({cc_count} CC in, {note_count} note in: {})",
             source.client,
             source.port,
             device.device_key,

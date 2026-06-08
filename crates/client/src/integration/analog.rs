@@ -47,6 +47,10 @@ impl AnalogInProducer {
     pub fn set(&self, value: f64) -> Result<(), Closed> {
         self.inner.set(value)
     }
+
+    pub fn update(&self, f: impl FnOnce(&mut f64)) -> Result<(), Closed> {
+        self.inner.update(f)
+    }
 }
 
 /// Transport-side handle for an `Out` control. The transport task reads
