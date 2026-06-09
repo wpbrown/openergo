@@ -37,7 +37,6 @@ pub struct CreditModule {
     utilization_cfg: Option<config::CreditUtilizationConfig>,
     // Kept alive for the lifetime of the process so the limit watch
     // never closes. Reserved for the future pain-driven tuner.
-    #[allow(dead_code)]
     limit_producer: CreditLimitProducer,
     limit_source: CreditLimitSource,
 }

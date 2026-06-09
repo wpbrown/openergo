@@ -26,7 +26,6 @@ pub struct ActivityState {
 }
 
 impl ActivityState {
-    #[allow(dead_code)]
     pub fn total(&self) -> Duration {
         self.total
     }
