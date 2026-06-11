@@ -7,7 +7,7 @@ use crate::credit::limit::{self, CreditLimitProducer, CreditLimitSource, CreditL
 use crate::credit::utilization::{
     self, CreditEventSource, CreditUtilizationSource, CreditUtilizationState,
 };
-use crate::integration::{AnalogOutProducer, Binder, EndpointConfig};
+use crate::integration::{AnalogOutProducer, Binder, EndpointConfig, EndpointLabel};
 use crate::usage::AllUsageConsumer;
 use futures::FutureExt;
 use rootcause::prelude::*;
@@ -195,8 +195,21 @@ fn bind_sink<T: EndpointConfig>(
     let Some(label) = label else {
         return Ok(None);
     };
-    let producer = binder.analog_out(label, initial).map_err(|e| {
-        report!("credit.utilization.{field} binding failed for control '{label}': {e}")
-    })?;
+    let label_handle = resolve_endpoint(binder, "credit.utilization", field, label)?;
+    let producer = binder.analog_out(label_handle, initial).context(format!(
+        "Failed to bind credit.utilization.{field} as output"
+    ))?;
     Ok(Some(producer))
+}
+
+fn resolve_endpoint<T: EndpointConfig>(
+    binder: &Binder<T>,
+    section: &str,
+    field: &str,
+    label: &str,
+) -> Result<EndpointLabel, Report> {
+    binder
+        .labels()
+        .get(label)
+        .ok_or_else(|| report!("{section}.{field} references unknown control '{label}'"))
 }

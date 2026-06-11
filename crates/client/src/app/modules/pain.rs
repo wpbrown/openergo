@@ -34,10 +34,9 @@ impl PainModule {
     ) -> Result<Vec<(PainLabel, AnalogIn)>, Report> {
         let mut out = Vec::with_capacity(self.sources.len());
         for (pain_label, source_label) in &self.sources {
-            let source_label_str = binder.labels().resolve(*source_label);
-            let analog_in = binder.analog_in(source_label_str).map_err(|e| {
-                report!("pain source binding failed for control '{source_label_str}': {e}")
-            })?;
+            let analog_in = binder
+                .analog_in(*source_label)
+                .context("Failed to bind pain source as input")?;
             out.push((*pain_label, analog_in));
         }
         Ok(out)

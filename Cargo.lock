@@ -401,9 +401,9 @@ dependencies = [
 
 [[package]]
 name = "bachelor"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b241a92268dd6f197153140e292bc737d1d99d289cb646e89b37f3c1fc4c8a7"
+checksum = "82155e8001b32f81bb5e2bd5b098fe0f91de5c69876ca5996882ec675f0ae2d7"
 dependencies = [
  "bitflags 2.11.0",
  "futures-core",

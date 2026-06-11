@@ -4,11 +4,20 @@ use futures::FutureExt;
 use futures::future::Either;
 use std::future::{Future, Pending};
 
-pub(crate) trait FiniteChanges {
+pub trait FiniteChanges {
     fn changed(&mut self) -> impl Future<Output = Result<(), Closed>> + Unpin + '_;
 }
 
-pub(crate) trait ChangeSet {
+impl<T: FiniteChanges> FiniteChanges for Option<T> {
+    fn changed(&mut self) -> impl Future<Output = Result<(), Closed>> + Unpin + '_ {
+        match self {
+            Some(inner) => Either::Left(inner.changed()),
+            None => Either::Right(std::future::ready(Err(Closed))),
+        }
+    }
+}
+
+pub trait ChangeSet {
     type Key: Flags + Copy;
 
     fn changed(
@@ -17,24 +26,28 @@ pub(crate) trait ChangeSet {
     ) -> impl Future<Output = Result<Self::Key, Self::Key>> + '_;
 }
 
-pub(crate) struct WatchMux<T: ChangeSet> {
+pub struct WatchMux<T: ChangeSet> {
     inputs: T,
     open: T::Key,
 }
 
 impl<T: ChangeSet> WatchMux<T> {
-    pub(crate) fn new(inputs: T) -> Self {
+    pub fn new(inputs: T) -> Self {
         Self {
             inputs,
             open: T::Key::all(),
         }
     }
 
-    pub(crate) fn get(&self) -> &T {
+    pub fn get(&self) -> &T {
         &self.inputs
     }
 
-    pub(crate) async fn changed(&mut self) -> Result<T::Key, Closed> {
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.inputs
+    }
+
+    pub async fn changed(&mut self) -> Result<T::Key, Closed> {
         loop {
             match self.inputs.changed(self.open).await {
                 Ok(changed) => return Ok(changed),
@@ -48,12 +61,12 @@ impl<T: ChangeSet> WatchMux<T> {
         }
     }
 
-    pub(crate) async fn closed(&mut self) {
+    pub async fn closed(&mut self) {
         while self.changed().await.is_ok() {}
     }
 }
 
-pub(crate) fn changed_if_open<C, K>(
+pub fn changed_if_open<C, K>(
     open: K,
     key: K,
     consumer: &mut C,
@@ -73,29 +86,71 @@ where
     }
 }
 
-macro_rules! define_watch_mux_4 {
+macro_rules! define_watch_mux {
     (
         $vis:vis struct $inputs:ident;
         $flags_vis:vis flags $flags:ident;
-        $field1:ident : $ty1:ty => $flag1:ident,
-        $field2:ident : $ty2:ty => $flag2:ident,
-        $field3:ident : $ty3:ty => $flag3:ident,
-        $field4:ident : $ty4:ty => $flag4:ident $(,)?
+        $(
+            $field:ident : $ty:ty => $flag:ident
+        ),+ $(,)?
+    ) => {
+        define_watch_mux! {
+            @collect
+            [$vis, $inputs, $flags_vis, $flags]
+            []
+            1u8;
+            $($field : $ty => $flag),+
+        }
+    };
+
+    (
+        @collect
+        [$vis:vis, $inputs:ident, $flags_vis:vis, $flags:ident]
+        [$($collected:tt)*]
+        $bit:expr;
+        $field:ident : $ty:ty => $flag:ident,
+        $($rest:tt)+
+    ) => {
+        define_watch_mux! {
+            @collect
+            [$vis, $inputs, $flags_vis, $flags]
+            [$($collected)* ($field, $ty, $flag, $bit)]
+            ($bit << 1);
+            $($rest)+
+        }
+    };
+
+    (
+        @collect
+        [$vis:vis, $inputs:ident, $flags_vis:vis, $flags:ident]
+        [$($collected:tt)*]
+        $bit:expr;
+        $field:ident : $ty:ty => $flag:ident
+    ) => {
+        define_watch_mux! {
+            @emit
+            [$vis, $inputs, $flags_vis, $flags]
+            [$($collected)* ($field, $ty, $flag, $bit)]
+        }
+    };
+
+    (
+        @emit
+        [$vis:vis, $inputs:ident, $flags_vis:vis, $flags:ident]
+        [$(($field:ident, $ty:ty, $flag:ident, $bit:expr))*]
     ) => {
         $vis struct $inputs {
-            pub $field1: $ty1,
-            pub $field2: $ty2,
-            pub $field3: $ty3,
-            pub $field4: $ty4,
+            $(
+                pub $field: $ty,
+            )+
         }
 
         ::bitflags::bitflags! {
-            #[derive(Clone, Copy)]
+            #[derive(Clone, Copy, PartialEq, Eq)]
             $flags_vis struct $flags: u8 {
-                const $flag1 = 0b0001;
-                const $flag2 = 0b0010;
-                const $flag3 = 0b0100;
-                const $flag4 = 0b1000;
+                $(
+                    const $flag = $bit;
+                )+
             }
         }
 
@@ -107,42 +162,29 @@ macro_rules! define_watch_mux_4 {
                 open: Self::Key,
             ) -> impl ::std::future::Future<Output = Result<Self::Key, Self::Key>> + '_ {
                 async move {
-                    use ::futures::future::{select, Either};
+                    $(
+                        let mut $field = $crate::watch_mux::changed_if_open(
+                            open,
+                            $flags::$flag,
+                            &mut self.$field,
+                        );
+                    )+
 
-                    let $field1 = $crate::watch_mux::changed_if_open(
-                        open,
-                        $flags::$flag1,
-                        &mut self.$field1,
-                    );
-                    let $field2 = $crate::watch_mux::changed_if_open(
-                        open,
-                        $flags::$flag2,
-                        &mut self.$field2,
-                    );
-                    let $field3 = $crate::watch_mux::changed_if_open(
-                        open,
-                        $flags::$flag3,
-                        &mut self.$field3,
-                    );
-                    let $field4 = $crate::watch_mux::changed_if_open(
-                        open,
-                        $flags::$flag4,
-                        &mut self.$field4,
-                    );
-                    let any_change = select(
-                        select($field1, $field2),
-                        select($field3, $field4),
-                    );
-                    match any_change.await {
-                        Either::Left((Either::Left((res, _)), _))
-                        | Either::Left((Either::Right((res, _)), _))
-                        | Either::Right((Either::Left((res, _)), _))
-                        | Either::Right((Either::Right((res, _)), _)) => res,
-                    }
+                    ::std::future::poll_fn(|cx| {
+                        $(
+                            if let ::std::task::Poll::Ready(res) =
+                                ::std::pin::Pin::new(&mut $field).poll(cx)
+                            {
+                                return ::std::task::Poll::Ready(res);
+                            }
+                        )+
+                        ::std::task::Poll::Pending
+                    })
+                    .await
                 }
             }
         }
     };
 }
 
-pub(crate) use define_watch_mux_4;
+pub(crate) use define_watch_mux;

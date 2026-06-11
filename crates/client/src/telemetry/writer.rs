@@ -4,7 +4,7 @@ use crate::credit::SplitCreditSnapshot;
 use crate::credit::limit::CreditLimitConsumer;
 use crate::pain::PainConsumer;
 use crate::usage::AllUsageConsumer;
-use crate::watch_mux::{WatchMux, define_watch_mux_4};
+use crate::watch_mux::{WatchMux, define_watch_mux};
 use futures::future::{Either, select};
 use rootcause::prelude::*;
 use shared::model::UsageSnapshot;
@@ -15,7 +15,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 const METRIC_EXPORT_INTERVAL_NAME: &str = "OTEL_METRIC_EXPORT_INTERVAL";
 
-define_watch_mux_4! {
+define_watch_mux! {
     struct TelemetryInputs;
     flags TelemetryInput;
     usage: AllUsageConsumer => USAGE,

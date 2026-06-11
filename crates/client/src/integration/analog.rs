@@ -37,6 +37,12 @@ impl AnalogIn {
     }
 }
 
+impl crate::watch_mux::FiniteChanges for AnalogIn {
+    fn changed(&mut self) -> impl Future<Output = Result<(), Closed>> + Unpin + '_ {
+        AnalogIn::changed(self)
+    }
+}
+
 /// Transport-side handle for an `In` control. The transport task writes
 /// the device's most recent value here.
 pub struct AnalogInProducer {

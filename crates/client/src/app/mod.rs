@@ -37,7 +37,11 @@ pub async fn run(
 
     // init endpoints and pain catalogs
     let endpoints_catalog = modules::endpoints::init(devices);
-    let pain_module = modules::pain::init(pain, endpoints_catalog.labels())?;
+    let (pain_cfg, pain_check_cfg) = pain
+        .map(|pain| (Some(pain.settings), pain.check))
+        .unwrap_or_default();
+    let pain_module = modules::pain::init(pain_cfg, endpoints_catalog.labels())?;
+    let pain_check_module = modules::pain_check::init(pain_check_cfg, endpoints_catalog.labels())?;
 
     // init persistence: load all data
     let (persistence_module, snapshot) =
@@ -77,6 +81,10 @@ pub async fn run(
     let mut binder = crate::integration::Binder::new(endpoints_catalog);
     let pain_sources = pain_module.bind_sources(&mut binder)?;
     let credit_sinks = credit_module.bind_sinks(&mut binder, &initial_util)?;
+    let pain_check_bindings = pain_check_module
+        .as_ref()
+        .map(|module| module.bind_endpoints(&mut binder))
+        .transpose()?;
     let label_store = binder.labels();
     let transports_module = modules::transports::init(label_store, binder.complete());
 
@@ -104,6 +112,16 @@ pub async fn run(
 
     // pain tracking
     let (pain_source, pain_live_source, pain_producer, pain_task) = pain_module.start(initial_pain);
+    let pain_check_task = pain_check_module
+        .zip(pain_check_bindings)
+        .map(|(module, bindings)| {
+            module.start(
+                pain_source.subscribe_forward(),
+                credit_runtime.event_source().subscribe(),
+                activity_runtime.state_source().subscribe_forward(),
+                bindings,
+            )
+        });
 
     // integrations
     let pain_forwarder_task = (!pain_sources.is_empty())
@@ -192,6 +210,9 @@ pub async fn run(
     transform_tasks.push(activity_runtime.detach());
     transform_tasks.push(pain_task);
     if let Some(task) = pain_forwarder_task {
+        transform_tasks.push(task);
+    }
+    if let Some(task) = pain_check_task {
         transform_tasks.push(task);
     }
     if let Some(task) = sink_forwarder_task {

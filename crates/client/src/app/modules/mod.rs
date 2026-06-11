@@ -3,6 +3,7 @@ pub mod credit;
 pub mod endpoints;
 pub mod ipc_server;
 pub mod pain;
+pub mod pain_check;
 pub mod pain_integration;
 pub mod persistence;
 pub mod server_link;

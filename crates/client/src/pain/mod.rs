@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::trace;
 
+pub mod check;
 pub mod state;
 
 pub use state::{PainBias, PainLabel, PainLabelStore, PainLiveState, PainState};
@@ -189,12 +190,18 @@ async fn debounce_loop(
             break;
         }
 
-        match wait(&mut live).await {
-            DebounceWake::Changed => {}
-            DebounceWake::Closed => break,
-            DebounceWake::Quiet => {
-                if sync(&live, &state, &catalog).is_err() {
+        loop {
+            match wait(&mut live).await {
+                DebounceWake::Changed => {}
+                DebounceWake::Closed => {
+                    let _ = sync(&live, &state, &catalog);
                     return Ok(());
+                }
+                DebounceWake::Quiet => {
+                    if sync(&live, &state, &catalog).is_err() {
+                        return Ok(());
+                    }
+                    break;
                 }
             }
         }

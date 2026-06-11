@@ -7,7 +7,7 @@ use crate::usage::all::AllState;
 use crate::usage::breaks::BreakState;
 use crate::usage::daily::DayState;
 use crate::usage::rest::RestState;
-use crate::watch_mux::{WatchMux, define_watch_mux_4};
+use crate::watch_mux::{WatchMux, define_watch_mux};
 use bachelor::error::Closed;
 use directories::ProjectDirs;
 use jiff::Timestamp;
@@ -496,7 +496,7 @@ struct Driver {
     baggage: PersistBaggage,
 }
 
-define_watch_mux_4! {
+define_watch_mux! {
     struct PersistenceInputs;
     flags PersistenceInput;
     usage: AllUsageConsumer => USAGE,

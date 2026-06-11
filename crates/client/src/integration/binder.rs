@@ -3,6 +3,7 @@ use super::analog::{
     analog_in_pair, analog_out_pair,
 };
 use super::endpoints::{Direction, EndpointCatalog, EndpointConfig, EndpointLabel};
+use rootcause::prelude::*;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
@@ -14,45 +15,6 @@ pub struct EndpointBinding<T> {
     pub config: T,
     pub io: EndpointIo,
 }
-
-#[derive(Debug)]
-pub enum BindError {
-    Unknown(String),
-    DirectionMismatch {
-        label: String,
-        wanted: &'static str,
-        actual: Direction,
-    },
-    /// Returned by [`Binder::analog_out`] when the same label has
-    /// already been bound as an output. Outputs are exclusive (multiple
-    /// writers would race meaninglessly); inputs fan out and never
-    /// return this error.
-    AlreadyBound {
-        label: String,
-    },
-}
-
-impl std::fmt::Display for BindError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BindError::Unknown(label) => write!(f, "unknown control label '{label}'"),
-            BindError::DirectionMismatch {
-                label,
-                wanted,
-                actual,
-            } => write!(
-                f,
-                "control '{label}' has direction {actual:?}; cannot bind as {wanted}"
-            ),
-            BindError::AlreadyBound { label } => write!(
-                f,
-                "control '{label}' is already bound as AnalogOut; only one writer is allowed per output"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for BindError {}
 
 /// Internal scratch storage for a label that's been bound as an input.
 /// The shared [`AnalogInSource`] lets [`Binder::analog_in`] fan out
@@ -90,9 +52,9 @@ impl<T: EndpointConfig> Binder<T> {
     /// an `In` or `InOut` direction in the catalog) and return a freshly
     /// subscribed domain-side consumer. Multiple callers binding the
     /// same label all read the same transport-written value.
-    pub fn analog_in(&mut self, label: &str) -> Result<AnalogIn, BindError> {
-        let label_handle = self.lookup(label, Direction::allows_in, "AnalogIn")?;
-        let analog_in = match self.ins.entry(label_handle) {
+    pub fn analog_in(&mut self, label: EndpointLabel) -> Result<AnalogIn, Report> {
+        self.check_direction(label, Direction::allows_in, "AnalogIn")?;
+        let analog_in = match self.ins.entry(label) {
             Entry::Occupied(slot) => slot.get().source.subscribe(),
             Entry::Vacant(slot) => {
                 let (producer, source) = analog_in_pair();
@@ -111,17 +73,18 @@ impl<T: EndpointConfig> Binder<T> {
     /// the watch.
     ///
     /// Outputs are exclusive: a second call for the same label returns
-    /// [`BindError::AlreadyBound`].
+    /// an error report.
     pub fn analog_out(
         &mut self,
-        label: &str,
+        label: EndpointLabel,
         initial: f64,
-    ) -> Result<AnalogOutProducer, BindError> {
-        let label_handle = self.lookup(label, Direction::allows_out, "AnalogOut")?;
-        match self.outs.entry(label_handle) {
-            Entry::Occupied(_) => Err(BindError::AlreadyBound {
-                label: label.to_string(),
-            }),
+    ) -> Result<AnalogOutProducer, Report> {
+        self.check_direction(label, Direction::allows_out, "AnalogOut")?;
+        match self.outs.entry(label) {
+            Entry::Occupied(_) => bail!(
+                "control '{}' is already bound as AnalogOut; only one writer is allowed per output",
+                self.catalog.labels().resolve(label),
+            ),
             Entry::Vacant(slot) => {
                 let (producer, analog_out) = analog_out_pair(initial);
                 slot.insert(analog_out);
@@ -168,29 +131,24 @@ impl<T: EndpointConfig> Binder<T> {
         result
     }
 
-    fn lookup(
+    fn check_direction(
         &self,
-        label: &str,
+        label: EndpointLabel,
         allows: fn(Direction) -> bool,
         wanted: &'static str,
-    ) -> Result<EndpointLabel, BindError> {
-        let handle = self
-            .catalog
-            .labels()
-            .get(label)
-            .ok_or_else(|| BindError::Unknown(label.to_string()))?;
+    ) -> Result<(), Report> {
         let entry = self
             .catalog
-            .lookup(handle)
-            .ok_or_else(|| BindError::Unknown(label.to_string()))?;
+            .lookup(label)
+            .expect("EndpointLabel came from this catalog before binding completed");
         if !allows(entry.direction()) {
-            return Err(BindError::DirectionMismatch {
-                label: label.to_string(),
-                wanted,
-                actual: entry.direction(),
-            });
+            bail!(
+                "control '{}' has direction {}; cannot bind as {wanted}",
+                self.catalog.labels().resolve(label),
+                entry.direction().as_str(),
+            );
         }
-        Ok(handle)
+        Ok(())
     }
 }
 
@@ -249,10 +207,10 @@ mod tests {
         let mut binder = Binder::new(catalog);
 
         let mut analog_in = binder
-            .analog_in("left_index")
+            .analog_in(in_label)
             .expect("left_index is bindable as AnalogIn");
         let _out_producer = binder
-            .analog_out("led_rest", 0.42)
+            .analog_out(out_label, 0.42)
             .expect("led_rest is bindable as AnalogOut");
 
         let bound = binder.complete();
@@ -291,33 +249,29 @@ mod tests {
     }
 
     #[test]
-    fn binder_rejects_unknown_label() {
-        let catalog = build_catalog();
-        let mut binder = Binder::new(catalog);
-        assert!(matches!(
-            binder.analog_in("nope"),
-            Err(BindError::Unknown(ref s)) if s == "nope"
-        ));
-        assert!(matches!(
-            binder.analog_out("also_nope", 0.0),
-            Err(BindError::Unknown(ref s)) if s == "also_nope"
-        ));
-    }
-
-    #[test]
     fn binder_rejects_direction_mismatch() {
         let catalog = build_catalog();
+        let in_label = catalog
+            .labels()
+            .get("left_index")
+            .expect("left_index is in the catalog");
+        let out_label = catalog
+            .labels()
+            .get("led_rest")
+            .expect("led_rest is in the catalog");
         let mut binder = Binder::new(catalog);
         // led_rest is Out → trying to bind as AnalogIn must fail.
-        assert!(matches!(
-            binder.analog_in("led_rest"),
-            Err(BindError::DirectionMismatch { .. })
-        ));
+        let err = match binder.analog_in(out_label) {
+            Ok(_) => panic!("out endpoint cannot bind as AnalogIn"),
+            Err(err) => err,
+        };
+        assert!(format!("{err}").contains("cannot bind as AnalogIn"));
         // left_index is In → trying to bind as AnalogOut must fail.
-        assert!(matches!(
-            binder.analog_out("left_index", 0.0),
-            Err(BindError::DirectionMismatch { .. })
-        ));
+        let err = match binder.analog_out(in_label, 0.0) {
+            Ok(_) => panic!("in endpoint cannot bind as AnalogOut"),
+            Err(err) => err,
+        };
+        assert!(format!("{err}").contains("cannot bind as AnalogOut"));
     }
 
     #[test]
@@ -329,10 +283,8 @@ mod tests {
             .expect("left_index is in the catalog");
         let mut binder = Binder::new(catalog);
 
-        let mut a = binder.analog_in("left_index").expect("first bind");
-        let mut b = binder
-            .analog_in("left_index")
-            .expect("second bind fans out");
+        let mut a = binder.analog_in(in_label).expect("first bind");
+        let mut b = binder.analog_in(in_label).expect("second bind fans out");
 
         let mut bound = binder.complete();
         assert_eq!(bound.len(), 1);
@@ -352,13 +304,18 @@ mod tests {
     #[test]
     fn binder_rejects_double_analog_out() {
         let catalog = build_catalog();
+        let out_label = catalog
+            .labels()
+            .get("led_rest")
+            .expect("led_rest is in the catalog");
         let mut binder = Binder::new(catalog);
         let _first = binder
-            .analog_out("led_rest", 0.0)
+            .analog_out(out_label, 0.0)
             .expect("first analog_out succeeds");
-        assert!(matches!(
-            binder.analog_out("led_rest", 0.0),
-            Err(BindError::AlreadyBound { ref label }) if label == "led_rest"
-        ));
+        let err = match binder.analog_out(out_label, 0.0) {
+            Ok(_) => panic!("second analog_out fails"),
+            Err(err) => err,
+        };
+        assert!(format!("{err}").contains("already bound as AnalogOut"));
     }
 }

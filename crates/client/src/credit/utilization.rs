@@ -127,8 +127,18 @@ pub struct CreditEventConsumer {
 }
 
 impl CreditEventConsumer {
+    pub fn try_recv(&self) -> Result<Option<CreditEvent>, Closed> {
+        self.inner.try_recv()
+    }
+
     pub async fn recv(&mut self) -> Result<CreditEvent, Closed> {
         self.inner.recv_ref(|ev| *ev).await
+    }
+}
+
+impl crate::watch_mux::FiniteChanges for CreditEventConsumer {
+    fn changed(&mut self) -> impl Future<Output = Result<(), Closed>> + Unpin + '_ {
+        self.inner.ready()
     }
 }
 

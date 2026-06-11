@@ -54,7 +54,7 @@ pub struct Config {
     /// controls by global label, never by device key.
     #[serde(default)]
     pub devices: HashMap<String, DeviceConfig>,
-    pub pain: Option<PainConfig>,
+    pub pain: Option<PainConfigGroup>,
     pub credit: Option<CreditConfig>,
     pub rest: Option<RestConfig>,
     pub learning: Option<LearningConfig>,
@@ -133,11 +133,39 @@ pub struct MidiControlConfig {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PainConfigGroup {
+    #[serde(flatten)]
+    pub settings: PainConfig,
+    pub check: Option<PainCheckConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PainConfig {
     /// Logical pain signals, keyed by the user-facing pain label that
     /// surfaces in telemetry and persistence.
     #[serde(default)]
     pub sources: HashMap<String, PainSourceConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PainCheckConfig {
+    pub indicator: Option<String>,
+    pub acknowledge: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub notifications: PainCheckNotificationsConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct PainCheckNotificationsConfig {
+    #[serde(default)]
+    pub notifications: bool,
+    #[serde(default)]
+    pub sounds: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,7 +262,6 @@ impl Config {
         Ok(config)
     }
 
-    /// Validates `self` against the rules in `midi-refactor.md`.
     fn validate(&self) -> Result<(), Report> {
         // -- Build the global label -> resolved-MIDI-control map.
         // Walk devices in sorted order so error messages are stable.
@@ -330,10 +357,10 @@ impl Config {
         // -- Validate references (rules 6, 7).
         // Pain sources reference controls; control direction must allow `in`.
         if let Some(pain) = self.pain.as_ref() {
-            let mut source_names: Vec<&String> = pain.sources.keys().collect();
+            let mut source_names: Vec<&String> = pain.settings.sources.keys().collect();
             source_names.sort();
             for name in source_names {
-                let source = &pain.sources[name];
+                let source = &pain.settings.sources[name];
                 let resolution = by_label.get(&source.source).ok_or_else(|| {
                     report!(
                         "pain.sources.{name}.source references unknown control label '{}'",
@@ -496,5 +523,55 @@ mod tests {
             format!("{err}").contains("credit.costs.key"),
             "unexpected error: {err}"
         );
+    }
+
+    fn parse_config(input: &str) -> Config {
+        toml::from_str(input).expect("config should parse")
+    }
+
+    fn pain_check_base(indicator: &str, acknowledge: &str) -> String {
+        format!(
+            r#"
+            [devices.grid]
+            type = "midi"
+            port = "grid"
+
+            [devices.grid.controls.led_pain_stale]
+            message = "cc"
+            channel = 0
+            number = 1
+            direction = "out"
+
+            [devices.grid.controls.btn_pain_ack]
+            message = "note"
+            channel = 0
+            number = 2
+            direction = "in"
+
+            [pain.check]
+            indicator = {indicator}
+            acknowledge = {acknowledge}
+
+            [pain.check.notifications]
+            notifications = true
+            sounds = true
+            "#
+        )
+    }
+
+    #[test]
+    fn pain_check_config_parses_and_validates() {
+        let config = parse_config(&pain_check_base("\"led_pain_stale\"", "\"btn_pain_ack\""));
+
+        config.validate().expect("config should validate");
+        let check = config
+            .pain
+            .expect("pain config should be present")
+            .check
+            .expect("pain check config should be present");
+        assert_eq!(check.indicator.as_deref(), Some("led_pain_stale"));
+        assert_eq!(check.acknowledge.as_deref(), Some("btn_pain_ack"));
+        assert!(check.notifications.notifications);
+        assert!(check.notifications.sounds);
     }
 }
