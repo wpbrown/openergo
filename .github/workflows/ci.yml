@@ -21,5 +21,8 @@ jobs:
         uses: DeterminateSystems/flake-checker-action@main
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@v3
+        with:
+          extra-conf: |
+            build-dir = /nix/build
       - name: Check Flake
         run: nix flake check
