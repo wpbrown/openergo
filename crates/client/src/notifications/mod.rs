@@ -1,6 +1,6 @@
 use crate::assets;
 use crate::credit::utilization::{CreditEvent, CreditEventConsumer, CreditKind};
-use crate::sound::SoundPlayer;
+use crate::sound::QueuedSoundPlayer;
 use std::future::Future;
 use tracing::debug;
 
@@ -34,7 +34,7 @@ pub fn create(
 
 async fn run(config: NotificationSettings, mut events: CreditEventConsumer) {
     let player = if config.sounds {
-        match SoundPlayer::new() {
+        match QueuedSoundPlayer::new() {
             Ok(p) => Some(p),
             Err(e) => {
                 tracing::warn!("Failed to open audio output for notifications: {e}");
@@ -63,7 +63,7 @@ fn handle_event(
     ev: CreditEvent,
     config: &NotificationSettings,
     hits: &mut LimitHits,
-    player: Option<&SoundPlayer>,
+    player: Option<&QueuedSoundPlayer>,
 ) {
     match ev {
         CreditEvent::Reached { kind } => {

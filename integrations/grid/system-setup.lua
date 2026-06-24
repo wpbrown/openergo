@@ -54,8 +54,8 @@ end
 --
 -- The CC value is interpreted as a heat level:
 --     0          -> LED fully off
---     1 .. 100   -> green -> red gradient, brightness ramps 16 -> 255
---   101 .. 127   -> solid red "alert", pulsing faster as the value grows
+--     1 .. 99    -> green -> red gradient, brightness ramps 6 -> 127
+--   100 .. 127   -> solid red "alert" at brightness 255, pulsing faster as the value grows
 -- -----------------------------------------------------------------------------
 self.midirx_cb = function(self, header, event)
   -- event[1] = channel, event[2] = command (176 = CC), event[3] = CC number,
@@ -97,9 +97,9 @@ self.midirx_cb = function(self, header, event)
     led_color(led_index, 1, 0, 0, 0)
     led_value(led_index, 1, 0)
 
-  elseif cc_value <= 100 then
-    -- HEATMAP: linearly interpolate green->red and 16->255 brightness across
-    -- CC values 1..100. `ratio` is 0 at cc=1 and 1 at cc=100.
+  elseif cc_value < 100 then
+    -- HEATMAP: linearly interpolate green->red and brightness across CC values
+    -- 1..100. 
     local ratio = (cc_value - 1) / 99
     led_animation_phase_rate_type(led_index, 1, 0, 0, 0)
     led_color(
@@ -108,11 +108,11 @@ self.midirx_cb = function(self, header, event)
       floor(255 - 255 * ratio + 0.5),   -- green: 255 -> 0
       0                                 -- blue:  always 0
     )
-    led_value(led_index, 1, floor(16 + 239 * ratio + 0.5))
+    led_value(led_index, 1, floor(6 + 122 * ratio + 0.5))
 
   else
     -- ALERT: solid red at max brightness with a sine pulse (animation type 3
-    -- per the docs). Frequency scales 1..16 across cc 101..127, so higher
+    -- per the docs). Frequency scales 1..16 across cc 100..127, so higher
     -- values pulse faster. Clamp cc to 127 to keep the formula in range.
     if cc_value > 127 then
       cc_value = 127
@@ -122,7 +122,7 @@ self.midirx_cb = function(self, header, event)
     led_animation_phase_rate_type(
       led_index, 1,
       0,                                            -- phase
-      floor(1 + 15 * (cc_value - 101) / 26 + 0.5),  -- frequency: 1..16
+      floor(1 + 15 * (cc_value - 100) / 27 + 0.5),  -- frequency: 1..16
       3                                             -- type 3 = sine pulse
     )
   end

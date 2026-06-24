@@ -1,4 +1,4 @@
-use rodio::{Decoder, Source};
+use rodio::Decoder;
 use rootcause::prelude::*;
 use std::io::Cursor;
 
@@ -6,11 +6,14 @@ pub struct SoundPlayer {
     sink: rodio::MixerDeviceSink,
 }
 
+pub struct QueuedSoundPlayer {
+    _sink: rodio::MixerDeviceSink,
+    player: rodio::Player,
+}
+
 impl SoundPlayer {
     pub fn new() -> Result<Self, Report> {
-        let mut sink =
-            rodio::DeviceSinkBuilder::open_default_sink().context("Failed to open audio output")?;
-        sink.log_on_drop(false);
+        let sink = open_default_sink()?;
         Ok(Self { sink })
     }
 
@@ -20,26 +23,35 @@ impl SoundPlayer {
             self.sink.mixer().add(source);
         }
     }
+}
 
-    /// Play `bytes` back-to-back `n` times. Falls back to playing once if the
-    /// decoder cannot report a total duration (required to bound the
-    /// `repeat_infinite()` stream).
-    pub fn play_repeat(&self, bytes: &'static [u8], n: u32) {
-        if n == 0 {
-            return;
-        }
+impl QueuedSoundPlayer {
+    pub fn new() -> Result<Self, Report> {
+        let sink = open_default_sink()?;
+        let player = rodio::Player::connect_new(sink.mixer());
+        Ok(Self {
+            _sink: sink,
+            player,
+        })
+    }
+
+    pub fn play(&self, bytes: &'static [u8]) {
         let cursor = Cursor::new(bytes);
-        let Ok(source) = Decoder::try_from(cursor) else {
-            return;
-        };
-        match source.total_duration() {
-            Some(total) => {
-                let repeated = source.repeat_infinite().take_duration(total * n);
-                self.sink.mixer().add(repeated);
-            }
-            None => {
-                self.sink.mixer().add(source);
-            }
+        if let Ok(source) = Decoder::try_from(cursor) {
+            self.player.append(source);
         }
     }
+
+    pub fn play_repeat(&self, bytes: &'static [u8], n: u32) {
+        for _ in 0..n {
+            self.play(bytes);
+        }
+    }
+}
+
+fn open_default_sink() -> Result<rodio::MixerDeviceSink, Report> {
+    let mut sink =
+        rodio::DeviceSinkBuilder::open_default_sink().context("Failed to open audio output")?;
+    sink.log_on_drop(false);
+    Ok(sink)
 }
