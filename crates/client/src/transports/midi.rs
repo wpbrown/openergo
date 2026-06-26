@@ -176,6 +176,7 @@ struct OutEntry {
     channel: u8,
     number: u8,
     consumer: AnalogOut,
+    last_sent_cc: Option<u8>,
     /// `false` once the watch has closed; the per-iteration `select_all`
     /// skips closed entries.
     open: bool,
@@ -230,6 +231,7 @@ pub async fn run(
                             channel: ctrl.channel,
                             number: ctrl.number,
                             consumer,
+                            last_sent_cc: None,
                             open: true,
                         });
                     }
@@ -327,20 +329,11 @@ pub async fn run(
     // Initial AnalogOut publish: every watch is seeded with the persisted
     // value, so devices come up showing the correct state without waiting
     // for the first domain-side update.
-    for out in &outs {
+    for out in &mut outs {
         if !out.open {
             continue;
         }
-        let value = out.consumer.get();
-        let device = &devices[out.device_idx];
-        send_cc(
-            async_seq.seq(),
-            local_port,
-            &device.sendable_ports,
-            out.channel,
-            out.number,
-            ratio_to_cc(value),
-        );
+        publish_out(async_seq.seq(), local_port, &devices, out, true);
     }
 
     loop {
@@ -392,21 +385,7 @@ pub async fn run(
         match step {
             Step::Shutdown => return Ok(()),
             Step::OutChanged(idx, Ok(())) => {
-                let out = &outs[idx];
-                let value = out.consumer.get();
-                let device = &devices[out.device_idx];
-                trace!(
-                    "AnalogOut '{}' -> CC {} ch={} (device '{}')",
-                    out.label, out.number, out.channel, device.device_key,
-                );
-                send_cc(
-                    async_seq.seq(),
-                    local_port,
-                    &device.sendable_ports,
-                    out.channel,
-                    out.number,
-                    ratio_to_cc(value),
-                );
+                publish_out(async_seq.seq(), local_port, &devices, &mut outs[idx], false);
             }
             Step::OutChanged(idx, Err(Closed)) => {
                 let label = outs[idx].label;
@@ -440,25 +419,38 @@ pub async fn run(
                             &device.sendable_ports,
                         );
                     }
-                    for out in &outs {
+                    for out in &mut outs {
                         if !out.open || !newly_subscribed_devices.contains(&out.device_idx) {
                             continue;
                         }
-                        let value = out.consumer.get();
-                        let device = &devices[out.device_idx];
-                        send_cc(
-                            async_seq.seq(),
-                            local_port,
-                            &device.sendable_ports,
-                            out.channel,
-                            out.number,
-                            ratio_to_cc(value),
-                        );
+                        publish_out(async_seq.seq(), local_port, &devices, out, true);
                     }
                 }
             }
         }
     }
+}
+
+fn publish_out(seq: &Seq, our_port: i32, devices: &[DeviceState], out: &mut OutEntry, force: bool) {
+    let cc_value = ratio_to_cc(out.consumer.get());
+    if !force && out.last_sent_cc == Some(cc_value) {
+        return;
+    }
+
+    let device = &devices[out.device_idx];
+    trace!(
+        "AnalogOut '{}' -> CC {} ch={} value={} (device '{}')",
+        out.label, out.number, out.channel, cc_value, device.device_key,
+    );
+    send_cc(
+        seq,
+        our_port,
+        &device.sendable_ports,
+        out.channel,
+        out.number,
+        cc_value,
+    );
+    out.last_sent_cc = Some(cc_value);
 }
 
 fn handle_event(

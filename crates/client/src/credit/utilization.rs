@@ -11,6 +11,7 @@ use shared::model::ratio;
 use smallvec::SmallVec;
 use std::future::Future;
 use std::num::NonZeroUsize;
+use tracing::trace;
 
 /// Persisted snapshot of the most recently published per-kind raw ratios.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -135,6 +136,8 @@ const MAX_ESCALATION_LEVEL: u8 = 5;
 /// Per-step escalation increment (10%).
 const ESCALATION_STEP: f64 = 0.10;
 const ESCALATION_STEP_SCALE: f64 = 1.0 / ESCALATION_STEP;
+/// Minimum plain utilization increase to publish without a credit event (0.1%).
+const MIN_UTILIZATION_INCREASE: f64 = 0.001;
 type CreditEvents = SmallVec<[CreditEvent; 3]>;
 /// Broadcast channel capacity for credit events. Internal consumers are
 /// expected to poll immediately; 16 is generous.
@@ -176,22 +179,23 @@ async fn run(
     event_producer: SpmcBroadcastProducer<CreditEvent>,
 ) {
     let mut last_published = initial.last_published;
-    let mut last_publish_bucket = publish_bucket(last_published);
 
     loop {
         let current = compute_ratios(&sources, &limits);
-        let current_publish_bucket = publish_bucket(current);
+        let decision = credit_decision(current, last_published);
 
-        if current_publish_bucket != last_publish_bucket {
-            let events = report_events(current, last_published);
+        if decision.should_publish {
             let new_state = CreditUtilizationState {
                 last_published: current,
             };
+            trace!(
+                delta = ?utilization_delta(current, last_published),
+                "updating credit utilization state"
+            );
             let _ = state_producer.update(|s| *s = new_state);
             last_published = current;
-            last_publish_bucket = current_publish_bucket;
 
-            for ev in events {
+            for ev in decision.events {
                 let _ = event_producer.try_send(ev);
             }
         }
@@ -224,55 +228,80 @@ fn compute_ratios(sources: &AllUsageConsumer, limits: &CreditLimitConsumer) -> U
     })
 }
 
-fn publish_bucket(value: Utilization) -> Utilization {
+fn utilization_delta(current: Utilization, last: Utilization) -> Utilization {
     Utilization {
-        rest: floor_tenth_percent(value.rest),
-        breaks: floor_tenth_percent(value.breaks),
-        day: floor_tenth_percent(value.day),
+        rest: current.rest - last.rest,
+        breaks: current.breaks - last.breaks,
+        day: current.day - last.day,
     }
 }
 
-fn floor_tenth_percent(value: f64) -> f64 {
-    (value * 1000.0).floor() / 1000.0
+#[derive(Debug, Default, PartialEq)]
+struct CreditDecision {
+    should_publish: bool,
+    events: CreditEvents,
 }
 
-/// Events for a reportable utilization change, emitted in `[Rest, Breaks, Day]` order.
-fn report_events(current: Utilization, last: Utilization) -> CreditEvents {
-    let mut events = SmallVec::new();
-
-    let rest_ev = report_event_for_kind(CreditKind::Rest, current.rest, last.rest);
-    if let Some(ev) = rest_ev {
-        events.push(ev);
+impl CreditDecision {
+    fn apply(&mut self, action: CreditAction) {
+        match action {
+            CreditAction::Ignore => {}
+            CreditAction::Report => self.should_publish = true,
+            CreditAction::ReportEvent(event) => {
+                self.should_publish = true;
+                self.events.push(event);
+            }
+        }
     }
-
-    let breaks_ev = report_event_for_kind(CreditKind::Breaks, current.breaks, last.breaks);
-    if let Some(ev) = breaks_ev {
-        events.push(ev);
-    }
-
-    let day_ev = report_event_for_kind(CreditKind::Day, current.day, last.day);
-    if let Some(ev) = day_ev {
-        events.push(ev);
-    }
-
-    events
 }
 
-fn report_event_for_kind(kind: CreditKind, current: f64, last: f64) -> Option<CreditEvent> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreditAction {
+    Ignore,
+    Report,
+    ReportEvent(CreditEvent),
+}
+
+/// Combined publish and event decision, evaluated in `[Rest, Breaks, Day]` order.
+fn credit_decision(current: Utilization, last: Utilization) -> CreditDecision {
+    let mut decision = CreditDecision::default();
+
+    decision.apply(credit_action_for_kind(
+        CreditKind::Rest,
+        current.rest,
+        last.rest,
+    ));
+    decision.apply(credit_action_for_kind(
+        CreditKind::Breaks,
+        current.breaks,
+        last.breaks,
+    ));
+    decision.apply(credit_action_for_kind(
+        CreditKind::Day,
+        current.day,
+        last.day,
+    ));
+
+    decision
+}
+
+fn credit_action_for_kind(kind: CreditKind, current: f64, last: f64) -> CreditAction {
     let current_level = escalation_level(current);
     let last_level = escalation_level(last);
 
     if current < last {
-        Some(CreditEvent::Reset { kind })
+        CreditAction::ReportEvent(CreditEvent::Reset { kind })
     } else if current_level > last_level {
-        Some(CreditEvent::Escalation {
+        CreditAction::ReportEvent(CreditEvent::Escalation {
             kind,
             level: current_level,
         })
     } else if last < 1.0 && current >= 1.0 {
-        Some(CreditEvent::Reached { kind })
+        CreditAction::ReportEvent(CreditEvent::Reached { kind })
+    } else if current - last >= MIN_UTILIZATION_INCREASE {
+        CreditAction::Report
     } else {
-        None
+        CreditAction::Ignore
     }
 }
 
@@ -293,22 +322,34 @@ mod tests {
         }
     }
 
+    fn assert_event_decision(current: Utilization, last: Utilization, expected: &[CreditEvent]) {
+        let decision = credit_decision(current, last);
+        assert!(decision.should_publish);
+        assert_eq!(decision.events.as_slice(), expected);
+    }
+
     #[test]
-    fn publish_bucket_floors_to_tenth_percent() {
-        assert_eq!(publish_bucket(ratios(0.9999)).rest, 0.999);
-        assert_eq!(publish_bucket(ratios(1.0001)).rest, 1.0);
-        assert_eq!(publish_bucket(ratios(1.1099)).rest, 1.109);
-        assert_eq!(publish_bucket(ratios(1.1100)).rest, 1.11);
+    fn small_plain_increase_is_ignored() {
+        let decision = credit_decision(ratios(0.5009), ratios(0.5000));
+        assert!(!decision.should_publish);
+        assert!(decision.events.is_empty());
+    }
+
+    #[test]
+    fn large_plain_increase_reports_without_event() {
+        let decision = credit_decision(ratios(0.5020), ratios(0.5000));
+        assert!(decision.should_publish);
+        assert!(decision.events.is_empty());
     }
 
     #[test]
     fn rising_past_100_fires_reached_not_escalation() {
-        let evs = report_events(ratios(1.0), ratios(0.5));
-        assert_eq!(
-            evs.as_slice(),
+        assert_event_decision(
+            ratios(1.0),
+            ratios(0.5),
             &[CreditEvent::Reached {
-                kind: CreditKind::Rest
-            }]
+                kind: CreditKind::Rest,
+            }],
         );
     }
 
@@ -318,15 +359,13 @@ mod tests {
         let steps = [(1.10, 1u8), (1.20, 2), (1.30, 3), (1.40, 4), (1.50, 5)];
         for (current, expected_level) in steps {
             let current = ratios(current);
-            let evs = report_events(current, last);
-            assert_eq!(
-                evs.as_slice(),
+            assert_event_decision(
+                current,
+                last,
                 &[CreditEvent::Escalation {
                     kind: CreditKind::Rest,
                     level: expected_level,
                 }],
-                "step at current={}",
-                current.rest
             );
             last = current;
         }
@@ -334,76 +373,77 @@ mod tests {
 
     #[test]
     fn jumping_across_escalations_fires_latest_level_only() {
-        let evs = report_events(ratios(1.31), ratios(1.09));
-        assert_eq!(
-            evs.as_slice(),
+        assert_event_decision(
+            ratios(1.31),
+            ratios(1.09),
             &[CreditEvent::Escalation {
                 kind: CreditKind::Rest,
                 level: 3,
-            }]
+            }],
         );
 
-        let evs = report_events(ratios(1.31), ratios(0.99));
-        assert_eq!(
-            evs.as_slice(),
+        assert_event_decision(
+            ratios(1.31),
+            ratios(0.99),
             &[CreditEvent::Escalation {
                 kind: CreditKind::Rest,
                 level: 3,
-            }]
+            }],
         );
     }
 
     #[test]
     fn stuck_at_200_does_not_keep_firing() {
-        let evs = report_events(ratios(2.0), ratios(2.0));
-        assert!(evs.is_empty());
+        let decision = credit_decision(ratios(2.0), ratios(2.0));
+        assert!(!decision.should_publish);
+        assert!(decision.events.is_empty());
         assert_eq!(escalation_level(2.0), 5);
 
-        let evs = report_events(ratios(2.0), ratios(1.5));
-        assert!(evs.is_empty());
+        let decision = credit_decision(ratios(2.0), ratios(1.5));
+        assert!(decision.should_publish);
+        assert!(decision.events.is_empty());
     }
 
     #[test]
     fn decrease_anywhere_fires_reset() {
         for &(last, current) in &[(1.50f64, 1.40f64), (2.00, 1.99), (1.00, 0.50), (0.80, 0.70)] {
-            let evs = report_events(ratios(current), ratios(last));
-            assert_eq!(
-                evs.as_slice(),
+            assert_event_decision(
+                ratios(current),
+                ratios(last),
                 &[CreditEvent::Reset {
-                    kind: CreditKind::Rest
+                    kind: CreditKind::Rest,
                 }],
-                "decrease from last={last} to {current}"
             );
         }
     }
 
     #[test]
     fn reset_followed_by_recross_fires_reached_again() {
-        let evs = report_events(ratios(0.50), ratios(1.30));
-        assert_eq!(
-            evs.as_slice(),
+        assert_event_decision(
+            ratios(0.50),
+            ratios(1.30),
             &[CreditEvent::Reset {
-                kind: CreditKind::Rest
-            }]
+                kind: CreditKind::Rest,
+            }],
         );
 
-        let evs = report_events(ratios(1.0), ratios(0.50));
-        assert_eq!(
-            evs.as_slice(),
+        assert_event_decision(
+            ratios(1.0),
+            ratios(0.50),
             &[CreditEvent::Reached {
-                kind: CreditKind::Rest
-            }]
+                kind: CreditKind::Rest,
+            }],
         );
     }
 
     #[test]
     fn limit_change_pushing_stable_credit_over_100_fires_reached() {
-        let evs = report_events(ratios(1.05), ratios(0.90));
-        assert_eq!(
-            evs.as_slice(),
+        assert_event_decision(
+            ratios(1.05),
+            ratios(0.90),
             &[CreditEvent::Reached {
-                kind: CreditKind::Rest
-            }]
+                kind: CreditKind::Rest,
+            }],
         );
     }
 }
