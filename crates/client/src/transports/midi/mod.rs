@@ -102,17 +102,36 @@ struct OutEntry {
     open: bool,
 }
 
+struct PreparedMidiTransport {
+    devices: Vec<DeviceState>,
+    outs: Vec<OutEntry>,
+}
+
 /// Run the MIDI transport task until `shutdown` fires. Spawned as a
 /// single task owning one alsa seq client and all per-port subscriptions.
 pub async fn run(
     devices_cfg: Vec<MidiDeviceConfig>,
     mut shutdown: ShutdownSignal,
 ) -> Result<(), Report> {
-    if devices_cfg.iter().all(|d| d.controls.is_empty()) {
+    let Some(prepared) = prepare_devices(devices_cfg) else {
         // Nothing to do; just hold the future open until shutdown so the
         // join shape is consistent with the rest of the runtime.
         shutdown.wait().await;
         return Ok(());
+    };
+
+    let client_name =
+        CString::new("openergo").expect("static client name contains no interior nul");
+    let port_name = CString::new("controls").expect("static port name contains no interior nul");
+    let seq = AlsaSeqIo::open(&client_name, &port_name)
+        .context("Failed to open alsa sequencer client")?;
+
+    run_with_seq(seq, prepared, shutdown).await
+}
+
+fn prepare_devices(devices_cfg: Vec<MidiDeviceConfig>) -> Option<PreparedMidiTransport> {
+    if devices_cfg.iter().all(|d| d.controls.is_empty()) {
+        return None;
     }
 
     // Build per-device state directly from the resolved controls list.
@@ -175,11 +194,18 @@ pub async fn run(
         });
     }
 
-    let client_name =
-        CString::new("openergo").expect("static client name contains no interior nul");
-    let port_name = CString::new("controls").expect("static port name contains no interior nul");
-    let mut seq = AlsaSeqIo::open(&client_name, &port_name)
-        .context("Failed to open alsa sequencer client")?;
+    Some(PreparedMidiTransport { devices, outs })
+}
+
+async fn run_with_seq<S: SeqIo>(
+    mut seq: S,
+    prepared: PreparedMidiTransport,
+    mut shutdown: ShutdownSignal,
+) -> Result<(), Report> {
+    let PreparedMidiTransport {
+        mut devices,
+        mut outs,
+    } = prepared;
 
     // Maps each subscribed port to the device indices it matches.
     let mut active_ports: HashMap<Addr, Vec<usize>> = HashMap::new();
