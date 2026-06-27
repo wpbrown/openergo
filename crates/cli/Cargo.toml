@@ -17,6 +17,6 @@ futures = "0.3"
 jiff = "0.2"
 rootcause = "0.12"
 shared = { path = "../shared" }
-tokio = { version = "1", features = ["net", "rt", "signal"] }
+tokio = { version = "1.52.3", features = ["net", "rt", "signal"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
