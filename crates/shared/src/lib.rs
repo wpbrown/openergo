@@ -139,6 +139,13 @@ pub mod shutdown {
             Ok(this)
         }
 
+        /// Create a shutdown source that is triggered manually by tests
+        /// without installing OS signal handlers or spawning a watcher task.
+        pub fn new_manual() -> Self {
+            let (producer, source) = mpmc_latched::signal();
+            Self { producer, source }
+        }
+
         /// Trigger shutdown, waking every outstanding [`ShutdownSignal`].
         pub fn trigger(&self) {
             self.producer.notify();

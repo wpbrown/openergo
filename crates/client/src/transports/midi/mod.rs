@@ -11,6 +11,9 @@ use tracing::{debug, info, trace, warn};
 
 mod seq_io;
 
+#[cfg(test)]
+mod tests;
+
 use seq_io::{Addr, AlsaSeqIo, InputEvent, PortAccess, SeqClientInfo, SeqIo, SeqPortInfo};
 
 /// After we issue `subscribe_port` for a MIDI device, the source client
