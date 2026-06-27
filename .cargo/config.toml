@@ -1,2 +1,6 @@
+[build]
+# Required named tasks using `tokio::task::Builder`
+rustflags = ["--cfg", "tokio_unstable"]
+
 [alias]
 xtask = "run -p xtask --"
