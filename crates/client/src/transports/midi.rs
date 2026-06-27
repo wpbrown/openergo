@@ -1,23 +1,17 @@
 use crate::integration::{AnalogInProducer, AnalogOut, EndpointIo};
-use alsa::seq::{
-    Addr, ClientIter, EvCtrl, EvNote, Event, EventType, PortCap, PortIter, PortSubscribe, PortType,
-    Seq,
-};
-use alsa::{Direction as AlsaDirection, PollDescriptors};
 use bachelor::error::Closed;
 use futures::future::{Either, select, select_all};
-use futures::{Stream, StreamExt};
 use rootcause::prelude::*;
 use shared::shutdown::ShutdownSignal;
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
-use std::os::fd::{AsRawFd, RawFd};
 use std::pin::{Pin, pin};
-use std::task::{Context, Poll, ready};
 use std::time::Duration;
-use tokio::io::unix::AsyncFd;
 use tracing::{debug, info, trace, warn};
+
+mod seq_io;
+
+use seq_io::{Addr, AlsaSeqIo, InputEvent, PortAccess, SeqClientInfo, SeqIo, SeqPortInfo};
 
 /// After we issue `subscribe_port` for a MIDI device, the source client
 /// (e.g. the rawmidi → seq bridge) flushes any events it had buffered
@@ -78,80 +72,6 @@ pub struct MidiDeviceConfig {
     pub port_match: Option<String>,
     pub client_match: Option<String>,
     pub controls: Vec<MidiControlDefinition>,
-}
-
-/// Holds the alsa seq client together with the cached poll fd. Implementing
-/// `AsRawFd` lets us hand the whole thing to [`AsyncFd`] just like
-/// `AsyncMonitorSocket` wraps `udev::MonitorSocket`.
-struct SeqHolder {
-    seq: Seq,
-    fd: RawFd,
-}
-
-impl AsRawFd for SeqHolder {
-    fn as_raw_fd(&self) -> RawFd {
-        self.fd
-    }
-}
-
-/// Async wrapper around an `alsa::seq::Seq` opened in non-blocking capture
-/// mode. Each readiness wake yields one decoded event; subsequent
-/// `poll_next` calls drain the buffer before re-arming the fd.
-pub struct AsyncSeq {
-    fd: AsyncFd<SeqHolder>,
-}
-
-impl AsyncSeq {
-    pub fn new(seq: Seq) -> Result<Self, Report> {
-        let pds = (&seq, Some(AlsaDirection::Capture));
-        let count = pds.count();
-        if count != 1 {
-            bail!("alsa seq returned {count} poll fds; expected exactly 1");
-        }
-        let mut pollfds = [libc::pollfd {
-            fd: 0,
-            events: 0,
-            revents: 0,
-        }];
-        pds.fill(&mut pollfds)
-            .context("Failed to fill alsa seq poll descriptor")?;
-        let holder = SeqHolder {
-            seq,
-            fd: pollfds[0].fd,
-        };
-        Ok(Self {
-            fd: AsyncFd::new(holder).context("Failed to register alsa seq fd")?,
-        })
-    }
-
-    pub fn seq(&self) -> &Seq {
-        &self.fd.get_ref().seq
-    }
-}
-
-impl Stream for AsyncSeq {
-    type Item = Result<Event<'static>, alsa::Error>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            let mut guard = ready!(self.fd.poll_read_ready(cx).map_err(|error| {
-                alsa::Error::new(
-                    "AsyncSeq::poll_read_ready",
-                    error.raw_os_error().unwrap_or(libc::EIO),
-                )
-            }))?;
-
-            let mut input = guard.get_inner().seq.input();
-            match input.event_input() {
-                Ok(ev) => return Poll::Ready(Some(Ok(ev.into_owned()))),
-                Err(e) if e.errno() == libc::EAGAIN => {
-                    drop(input);
-                    guard.clear_ready();
-                }
-                Err(e) => return Poll::Ready(Some(Err(e))),
-            }
-        }
-    }
 }
 
 /// One configured device after binding: matching info + the per-message,
@@ -255,57 +175,29 @@ pub async fn run(
         });
     }
 
-    // `None` for direction opens the seq client in duplex mode so we can
-    // both receive controller events and send the Grid fader-state SysEx.
-    let seq = Seq::open(None, None, true).context("Failed to open alsa sequencer client")?;
     let client_name =
         CString::new("openergo").expect("static client name contains no interior nul");
-    seq.set_client_name(&client_name)
-        .context("Failed to set alsa client name")?;
-
     let port_name = CString::new("controls").expect("static port name contains no interior nul");
-    let local_port = seq
-        .create_simple_port(
-            &port_name,
-            PortCap::WRITE | PortCap::SUBS_WRITE | PortCap::READ | PortCap::SUBS_READ,
-            PortType::APPLICATION | PortType::MIDI_GENERIC,
-        )
-        .context("Failed to create local seq port")?;
-    let our_addr = Addr {
-        client: seq.client_id().context("Failed to query alsa client id")?,
-        port: local_port,
-    };
-
-    // Subscribe to system announce so we receive PortStart/PortExit hot-plug events.
-    {
-        let sub = PortSubscribe::empty().context("Failed to allocate port subscribe")?;
-        sub.set_sender(Addr::system_announce());
-        sub.set_dest(our_addr);
-        seq.subscribe_port(&sub)
-            .context("Failed to subscribe to system announce port")?;
-    }
+    let mut seq = AlsaSeqIo::open(&client_name, &port_name)
+        .context("Failed to open alsa sequencer client")?;
 
     // Maps each subscribed port to the device indices it matches.
     let mut active_ports: HashMap<Addr, Vec<usize>> = HashMap::new();
 
     // Initial enumerate.
-    for client in ClientIter::new(&seq) {
-        let client_id = client.get_client();
-        if client_id == our_addr.client {
-            continue;
-        }
-        let client_name = client.get_name().unwrap_or("").to_string();
-        for port in PortIter::new(&seq, client_id) {
+    for client in seq.clients() {
+        let client_name = client.client_name().unwrap_or("");
+        for port in client.ports() {
             let addr = port.addr();
-            let Ok(port_name) = port.get_name() else {
+            let Ok(port_name) = port.port_name() else {
                 continue;
             };
             try_subscribe(
                 &seq,
-                our_addr,
                 addr,
                 port_name,
-                &client_name,
+                client_name,
+                port.access(),
                 &mut devices,
                 &mut active_ports,
             );
@@ -318,13 +210,10 @@ pub async fn run(
     // the subscriptions above; that's fine because we only use the
     // `system_announce` subscription for future hot-plug events.
     tokio::time::sleep(STARTUP_DRAIN_DELAY).await;
-    seq.input()
-        .drop_input()
+    seq.drop_input()
         .context("Failed to drop buffered MIDI startup events")?;
 
-    let mut async_seq = AsyncSeq::new(seq).context("Failed to attach alsa seq to async runtime")?;
-
-    request_fader_state_from_subscribed_ports_all(async_seq.seq(), local_port, &devices);
+    request_fader_state_from_subscribed_ports_all(&seq, &devices);
 
     // Initial AnalogOut publish: every watch is seeded with the persisted
     // value, so devices come up showing the correct state without waiting
@@ -333,18 +222,18 @@ pub async fn run(
         if !out.open {
             continue;
         }
-        publish_out(async_seq.seq(), local_port, &devices, out, true);
+        publish_out(&seq, &devices, out, true);
     }
 
     loop {
         enum Step {
-            Event(Event<'static>),
+            Event(InputEvent),
             OutChanged(usize, Result<(), Closed>),
             Shutdown,
         }
 
         let step = {
-            let next_event = async_seq.next();
+            let next_event = pin!(seq.next_event());
             // Build per-iteration `changed()` futures only for still-open
             // outs. If every out has closed, fall back to a pending future
             // so the select waits for ALSA events / shutdown only.
@@ -354,6 +243,7 @@ pub async fn run(
                 .filter(|(_, o)| o.open)
                 .map(|(i, o)| (i, Box::pin(o.consumer.changed())))
                 .unzip();
+            // TODO: this can use watch_mux
             type AnyOut<'a> = Pin<Box<dyn Future<Output = (Result<(), Closed>, usize)> + 'a>>;
             let any_out: AnyOut<'_> = if waits.is_empty() {
                 Box::pin(async {
@@ -367,15 +257,12 @@ pub async fn run(
                 })
             };
             let wait_shutdown = shutdown.wait();
-            match select(select(pin!(next_event), any_out), pin!(wait_shutdown)).await {
-                Either::Left((Either::Left((Some(Ok(ev)), _)), _)) => Step::Event(ev),
-                Either::Left((Either::Left((Some(Err(e)), _)), _)) => {
+            match select(select(next_event, any_out), wait_shutdown).await {
+                Either::Left((Either::Left((Ok(event), _)), _)) => Step::Event(event),
+                Either::Left((Either::Left((Err(e), _)), _)) => {
                     return Err(report!(e)
                         .context("alsa sequencer event stream error")
                         .into_dynamic());
-                }
-                Either::Left((Either::Left((None, _)), _)) => {
-                    bail!("alsa sequencer event stream ended unexpectedly")
                 }
                 Either::Left((Either::Right(((res, idx), _)), _)) => Step::OutChanged(idx, res),
                 Either::Right(_) => Step::Shutdown,
@@ -385,7 +272,7 @@ pub async fn run(
         match step {
             Step::Shutdown => return Ok(()),
             Step::OutChanged(idx, Ok(())) => {
-                publish_out(async_seq.seq(), local_port, &devices, &mut outs[idx], false);
+                publish_out(&seq, &devices, &mut outs[idx], false);
             }
             Step::OutChanged(idx, Err(Closed)) => {
                 let label = outs[idx].label;
@@ -399,8 +286,7 @@ pub async fn run(
                 let mut newly_subscribed_devices: HashSet<usize> = HashSet::new();
                 handle_event(
                     event,
-                    async_seq.seq(),
-                    our_addr,
+                    &seq,
                     &mut devices,
                     &mut active_ports,
                     &mut newly_subscribed_devices,
@@ -413,17 +299,13 @@ pub async fn run(
                 if !newly_subscribed_devices.is_empty() {
                     for &device_idx in &newly_subscribed_devices {
                         let device = &devices[device_idx];
-                        request_fader_state_from_subscribed_ports(
-                            async_seq.seq(),
-                            local_port,
-                            &device.sendable_ports,
-                        );
+                        request_fader_state_from_subscribed_ports(&seq, &device.sendable_ports);
                     }
                     for out in &mut outs {
                         if !out.open || !newly_subscribed_devices.contains(&out.device_idx) {
                             continue;
                         }
-                        publish_out(async_seq.seq(), local_port, &devices, out, true);
+                        publish_out(&seq, &devices, out, true);
                     }
                 }
             }
@@ -431,7 +313,7 @@ pub async fn run(
     }
 }
 
-fn publish_out(seq: &Seq, our_port: i32, devices: &[DeviceState], out: &mut OutEntry, force: bool) {
+fn publish_out<S: SeqIo>(seq: &S, devices: &[DeviceState], out: &mut OutEntry, force: bool) {
     let cc_value = ratio_to_cc(out.consumer.get());
     if !force && out.last_sent_cc == Some(cc_value) {
         return;
@@ -444,7 +326,6 @@ fn publish_out(seq: &Seq, our_port: i32, devices: &[DeviceState], out: &mut OutE
     );
     send_cc(
         seq,
-        our_port,
         &device.sendable_ports,
         out.channel,
         out.number,
@@ -453,36 +334,33 @@ fn publish_out(seq: &Seq, our_port: i32, devices: &[DeviceState], out: &mut OutE
     out.last_sent_cc = Some(cc_value);
 }
 
-fn handle_event(
-    event: Event<'static>,
-    seq: &Seq,
-    our_addr: Addr,
+fn handle_event<S: SeqIo>(
+    event: InputEvent,
+    seq: &S,
     devices: &mut [DeviceState],
     active_ports: &mut HashMap<Addr, Vec<usize>>,
     newly_subscribed_devices: &mut HashSet<usize>,
 ) {
-    match event.get_type() {
-        EventType::Controller => {
-            let Some(ctrl) = event.get_data::<EvCtrl>() else {
-                return;
-            };
-            let source = event.get_source();
+    match event {
+        InputEvent::Controller {
+            source,
+            channel,
+            controller,
+            value,
+        } => {
             let Some(device_indices) = active_ports.get(&source) else {
                 return;
             };
-            let value = (ctrl.value.clamp(0, 127) as f64) / 127.0;
-            let Ok(number) = u8::try_from(ctrl.param) else {
-                return;
-            };
+            let value = (value.clamp(0, 127) as f64) / 127.0;
             for &device_idx in device_indices {
                 let device = &devices[device_idx];
                 if let Some((label, producer)) =
-                    device.inputs.get(&(MidiMessage::Cc, ctrl.channel, number))
+                    device.inputs.get(&(MidiMessage::Cc, channel, controller))
                 {
                     trace!(
                         "MIDI controller {} ch={} on port {}:{} -> control '{}' = {} (device '{}')",
-                        ctrl.param,
-                        ctrl.channel,
+                        controller,
+                        channel,
                         source.client,
                         source.port,
                         label,
@@ -493,29 +371,25 @@ fn handle_event(
                 }
             }
         }
-        EventType::Noteon => {
-            let Some(note) = event.get_data::<EvNote>() else {
-                return;
-            };
-            if note.velocity == 0 {
-                return;
-            }
-            let source = event.get_source();
+        InputEvent::NoteOn {
+            source,
+            channel,
+            note,
+            velocity,
+        } => {
             let Some(device_indices) = active_ports.get(&source) else {
                 return;
             };
             for &device_idx in device_indices {
                 let device = &devices[device_idx];
                 if let Some((label, producer)) =
-                    device
-                        .inputs
-                        .get(&(MidiMessage::Note, note.channel, note.note))
+                    device.inputs.get(&(MidiMessage::Note, channel, note))
                 {
                     trace!(
                         "MIDI note-on {} ch={} vel={} on port {}:{} -> control '{}' += 1 (device '{}')",
-                        note.note,
-                        note.channel,
-                        note.velocity,
+                        note,
+                        channel,
+                        velocity,
                         source.client,
                         source.port,
                         label,
@@ -525,32 +399,26 @@ fn handle_event(
                 }
             }
         }
-        EventType::PortStart => {
-            let Some(addr) = event.get_data::<Addr>() else {
+        InputEvent::NoteOff { .. } => {}
+        InputEvent::PortStart { addr } => {
+            let Ok(Some(client)) = seq.client(addr.client) else {
                 return;
             };
-            if addr.client == our_addr.client {
-                return;
-            }
-            let Ok(port_info) = seq.get_any_port_info(addr) else {
+            let Ok(Some(port)) = seq.port(addr) else {
                 return;
             };
-            let Ok(port_name) = port_info.get_name() else {
+            let Ok(port_name) = port.port_name() else {
                 return;
             };
-            let client_name = seq
-                .get_any_client_info(addr.client)
-                .ok()
-                .and_then(|c| c.get_name().ok().map(str::to_string))
-                .unwrap_or_default();
+            let client_name = client.client_name().unwrap_or("");
             let sendable_before: Vec<HashSet<Addr>> =
                 devices.iter().map(|d| d.sendable_ports.clone()).collect();
             try_subscribe(
                 seq,
-                our_addr,
                 addr,
                 port_name,
-                &client_name,
+                client_name,
+                port.access(),
                 devices,
                 active_ports,
             );
@@ -560,10 +428,7 @@ fn handle_event(
                 }
             }
         }
-        EventType::PortExit => {
-            let Some(addr) = event.get_data::<Addr>() else {
-                return;
-            };
+        InputEvent::PortExit { addr } => {
             for device in devices.iter_mut() {
                 device.sendable_ports.remove(&addr);
             }
@@ -571,19 +436,14 @@ fn handle_event(
                 info!("MIDI port {}:{} exited", addr.client, addr.port);
             }
         }
-        _ => {}
     }
 }
 
 /// Send the fader-state SysEx to every sendable port across every device.
 /// Used at startup; for hot-plug, the per-device variant below is used.
-fn request_fader_state_from_subscribed_ports_all(
-    seq: &Seq,
-    our_port: i32,
-    devices: &[DeviceState],
-) {
+fn request_fader_state_from_subscribed_ports_all<S: SeqIo>(seq: &S, devices: &[DeviceState]) {
     for device in devices {
-        request_fader_state_from_subscribed_ports(seq, our_port, &device.sendable_ports);
+        request_fader_state_from_subscribed_ports(seq, &device.sendable_ports);
     }
 }
 
@@ -593,18 +453,10 @@ fn request_fader_state_from_subscribed_ports_all(
 /// event, which is then picked up by the normal `handle_event` path so
 /// AnalogIn state reflects the controller's true position before any user
 /// movement.
-fn request_fader_state_from_subscribed_ports(
-    seq: &Seq,
-    our_port: i32,
-    sendable_ports: &HashSet<Addr>,
-) {
+fn request_fader_state_from_subscribed_ports<S: SeqIo>(seq: &S, sendable_ports: &HashSet<Addr>) {
     for &dest in sendable_ports {
-        let mut event = Event::new_ext(EventType::Sysex, Cow::Borrowed(FADER_REQUEST_SYSEX));
-        event.set_source(our_port);
-        event.set_dest(dest);
-        event.set_direct();
-        match seq.event_output_direct(&mut event) {
-            Ok(_) => debug!(
+        match seq.send_sysex(dest, FADER_REQUEST_SYSEX) {
+            Ok(()) => debug!(
                 "Sent fader-state request SysEx to MIDI port {}:{}",
                 dest.client, dest.port,
             ),
@@ -623,26 +475,10 @@ fn ratio_to_cc(ratio: f64) -> u8 {
     scaled.clamp(0, 127) as u8
 }
 
-fn send_cc(
-    seq: &Seq,
-    our_port: i32,
-    sendable_ports: &HashSet<Addr>,
-    channel: u8,
-    cc: u8,
-    value: u8,
-) {
+fn send_cc<S: SeqIo>(seq: &S, sendable_ports: &HashSet<Addr>, channel: u8, cc: u8, value: u8) {
     for &dest in sendable_ports {
-        let ctrl = EvCtrl {
-            channel,
-            param: cc as u32,
-            value: value as i32,
-        };
-        let mut event = Event::new(EventType::Controller, &ctrl);
-        event.set_source(our_port);
-        event.set_dest(dest);
-        event.set_direct();
-        match seq.event_output_direct(&mut event) {
-            Ok(_) => trace!(
+        match seq.send_controller(dest, channel, cc, value) {
+            Ok(()) => trace!(
                 "Sent CC {cc}={value} ch={channel} to MIDI port {}:{}",
                 dest.client, dest.port,
             ),
@@ -654,13 +490,12 @@ fn send_cc(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn try_subscribe(
-    seq: &Seq,
-    our_addr: Addr,
+fn try_subscribe<S: SeqIo>(
+    seq: &S,
     source: Addr,
     port_name: &str,
     client_name: &str,
+    access: PortAccess,
     devices: &mut [DeviceState],
     active_ports: &mut HashMap<Addr, Vec<usize>>,
 ) {
@@ -676,21 +511,24 @@ fn try_subscribe(
     if matched.is_empty() {
         return;
     }
-    let sub = match PortSubscribe::empty() {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("Failed to allocate port subscribe: {e}");
+
+    let mut subscribed = false;
+    let mut receives_input = false;
+    if access.can_source_events {
+        if let Err(e) = seq.subscribe_incoming(source) {
+            warn!(
+                "Failed to subscribe to MIDI port {}:{} '{port_name}': {e}",
+                source.client, source.port,
+            );
             return;
         }
-    };
-    sub.set_sender(source);
-    sub.set_dest(our_addr);
-    if let Err(e) = seq.subscribe_port(&sub) {
-        warn!(
-            "Failed to subscribe to MIDI port {}:{} '{port_name}': {e}",
+        receives_input = true;
+        subscribed = true;
+    } else {
+        debug!(
+            "MIDI port {}:{} '{port_name}' (client '{client_name}') matched config but cannot source events; skipping incoming subscription",
             source.client, source.port,
         );
-        return;
     }
 
     // If the device port also accepts writes (i.e. has both WRITE and
@@ -698,29 +536,34 @@ fn try_subscribe(
     // send the Grid fader-state request SysEx and outbound CCs without
     // ENODEV.
     let mut sendable = false;
-    if let Ok(info) = seq.get_any_port_info(source) {
-        let caps = info.get_capability();
-        if caps.contains(PortCap::WRITE | PortCap::SUBS_WRITE) {
-            match PortSubscribe::empty() {
-                Ok(send_sub) => {
-                    send_sub.set_sender(our_addr);
-                    send_sub.set_dest(source);
-                    match seq.subscribe_port(&send_sub) {
-                        Ok(()) => {
-                            sendable = true;
-                        }
-                        Err(e) => warn!(
-                            "Failed to subscribe send path to MIDI port {}:{} '{port_name}': {e}",
-                            source.client, source.port,
-                        ),
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to allocate send port subscribe: {e}");
-                }
+    if access.can_receive_events {
+        match seq.subscribe_outgoing(source) {
+            Ok(()) => {
+                sendable = true;
+                subscribed = true;
             }
+            Err(e) => warn!(
+                "Failed to subscribe send path to MIDI port {}:{} '{port_name}': {e}",
+                source.client, source.port,
+            ),
         }
     }
+
+    if !subscribed {
+        debug!(
+            "MIDI port {}:{} '{port_name}' (client '{client_name}') matched config but has no usable ALSA subscription direction; skipping",
+            source.client, source.port,
+        );
+        return;
+    }
+
+    let subscription_direction = match (receives_input, sendable) {
+        (true, true) => "input+output",
+        (true, false) => "input-only",
+        (false, true) => "output-only",
+        (false, false) => "none",
+    };
+
     for &device_idx in &matched {
         let device = &mut devices[device_idx];
         if sendable {
@@ -738,7 +581,7 @@ fn try_subscribe(
             .count();
         let in_labels: Vec<&str> = device.inputs.values().map(|(label, _)| *label).collect();
         info!(
-            "Subscribed MIDI port {}:{} '{port_name}' (client '{client_name}') for device '{}' ({cc_count} CC in, {note_count} note in: {})",
+            "Subscribed MIDI port {}:{} '{port_name}' (client '{client_name}') for device '{}' ({subscription_direction}; {cc_count} CC in, {note_count} note in: {})",
             source.client,
             source.port,
             device.device_key,
