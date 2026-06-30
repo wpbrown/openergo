@@ -1,11 +1,13 @@
 use crate::integration::{AnalogInProducer, AnalogOut, EndpointIo};
 use bachelor::error::Closed;
-use futures::future::{Either, select, select_all};
+use futures::FutureExt;
+use futures::future::{Either, select};
 use rootcause::prelude::*;
+use shared::select_small::select_small_once;
 use shared::shutdown::ShutdownSignal;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::time::Duration;
 use tracing::{debug, info, trace, warn};
 
@@ -263,27 +265,15 @@ async fn run_with_seq<S: SeqIo>(
 
         let step = {
             let next_event = pin!(seq.next_event());
-            // Build per-iteration `changed()` futures only for still-open
-            // outs. If every out has closed, fall back to a pending future
-            // so the select waits for ALSA events / shutdown only.
-            let (active_indices, waits): (Vec<usize>, Vec<_>) = outs
-                .iter_mut()
-                .enumerate()
-                .filter(|(_, o)| o.open)
-                .map(|(i, o)| (i, Box::pin(o.consumer.changed())))
-                .unzip();
-            // TODO: this can use watch_mux
-            type AnyOut<'a> = Pin<Box<dyn Future<Output = (Result<(), Closed>, usize)> + 'a>>;
-            let any_out: AnyOut<'_> = if waits.is_empty() {
-                Box::pin(async {
-                    std::future::pending::<()>().await;
-                    unreachable!()
-                })
+            let any_out = if outs.iter().any(|o| o.open) {
+                Either::Left(select_small_once::<_, 8>(
+                    outs.iter_mut()
+                        .enumerate()
+                        .filter(|(_, o)| o.open)
+                        .map(|(idx, o)| o.consumer.changed().map(move |res| (res, idx))),
+                ))
             } else {
-                Box::pin(async move {
-                    let (res, fired_idx, _rem) = select_all(waits).await;
-                    (res, active_indices[fired_idx])
-                })
+                Either::Right(std::future::pending())
             };
             let wait_shutdown = shutdown.wait();
             match select(select(next_event, any_out), wait_shutdown).await {
@@ -293,7 +283,9 @@ async fn run_with_seq<S: SeqIo>(
                         .context("alsa sequencer event stream error")
                         .into_dynamic());
                 }
-                Either::Left((Either::Right(((res, idx), _)), _)) => Step::OutChanged(idx, res),
+                Either::Left((Either::Right((((res, idx), _), _)), _)) => {
+                    Step::OutChanged(idx, res)
+                }
                 Either::Right(_) => Step::Shutdown,
             }
         };
