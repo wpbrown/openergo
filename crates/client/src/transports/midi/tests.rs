@@ -1,3 +1,4 @@
+use super::client::MidiDeviceId;
 use super::seq_io::{SeqIoResult, *};
 use super::*;
 use crate::integration::{
@@ -755,9 +756,12 @@ async fn spawn_transport(fixture: MidiTransportFixture, fake: FakeSeqIo) -> Runn
         analog_ins,
         analog_outs,
     } = fixture;
-    let prepared = prepare_devices(devices).expect("fixture config has controls");
     let shutdown = ShutdownSource::new_manual();
-    let task = tokio::task::spawn_local(run_with_seq(fake.clone(), prepared, shutdown.signal()));
+    let task = tokio::task::spawn_local(driver::run_with_seq(
+        fake.clone(),
+        devices,
+        shutdown.signal(),
+    ));
     tokio::task::yield_now().await;
     RunningTransport {
         fake,
@@ -876,6 +880,29 @@ fn one_cc_out_fixture(initial: f64) -> MidiTransportFixture {
     builder.finish()
 }
 
+fn midi_client_config(devices: Vec<client::MidiDeviceSpec>) -> client::MidiClientConfig {
+    client::MidiClientConfig {
+        devices,
+        startup_drain_delay: std::time::Duration::ZERO,
+    }
+}
+
+fn midi_device_spec(
+    index: usize,
+    key: &str,
+    wants_input: bool,
+    wants_output: bool,
+) -> client::MidiDeviceSpec {
+    client::MidiDeviceSpec {
+        id: MidiDeviceId::from_index(index),
+        key: key.to_owned(),
+        port_match: Some("Port".to_owned()),
+        client_match: Some("Grid".to_owned()),
+        wants_input,
+        wants_output,
+    }
+}
+
 fn sysex_op(dest: Addr) -> FakeSeqOp {
     FakeSeqOp::SendSysex {
         dest,
@@ -986,7 +1013,7 @@ async fn startup_waits_before_drop_sysex_and_initial_output() {
 }
 
 #[tokio::test(flavor = "local", start_paused = true)]
-async fn initial_output_publishes_seeded_analog_state_to_sendable_ports() {
+async fn one_configured_device_matching_two_startup_ports_is_unavailable() {
     let first = addr(20, 1);
     let second = addr(20, 2);
     let fake = fake_with_ports(vec![
@@ -998,13 +1025,7 @@ async fn initial_output_publishes_seeded_analog_state_to_sendable_ports() {
 
     finish_startup().await;
 
-    let ops = running.fake.take_ops();
-    assert_eq!(ops.first(), Some(&FakeSeqOp::DropInput));
-    assert_unordered_ops(&ops[1..3], &[sysex_op(first), sysex_op(second)]);
-    assert_unordered_ops(
-        &ops[3..5],
-        &[cc_op(first, 0, 7, 42), cc_op(second, 0, 7, 42)],
-    );
+    assert_eq!(running.fake.take_ops(), vec![FakeSeqOp::DropInput]);
     shutdown_and_expect_ok(running).await;
 }
 
@@ -1051,6 +1072,76 @@ async fn output_only_matching_port_sends_startup_output() {
         ]
     );
     shutdown_and_expect_ok(running).await;
+}
+
+#[tokio::test(flavor = "local", start_paused = true)]
+async fn layer2_reports_multiple_matching_ports_without_subscribing() {
+    let first = addr(20, 1);
+    let second = addr(20, 2);
+    let fake = fake_with_ports(vec![
+        grid_port(first, access_in_only()),
+        grid_port(second, access_in_only()),
+    ]);
+    let mut client = client::MidiClient::start(
+        fake.clone(),
+        midi_client_config(vec![midi_device_spec(0, "grid", true, false)]),
+    )
+    .await
+    .expect("client starts");
+
+    assert_eq!(
+        fake.take_ops(),
+        vec![
+            FakeSeqOp::EnumerateClients,
+            FakeSeqOp::EnumeratePorts { client: 20 },
+            FakeSeqOp::DropInput,
+        ]
+    );
+    assert_eq!(
+        client.next_event().await.expect("pending event"),
+        client::MidiClientEvent::DeviceUnavailable {
+            device: MidiDeviceId::from_index(0),
+            reason: client::DeviceUnavailableReason::MultipleMatchingPorts,
+        }
+    );
+}
+
+#[tokio::test(flavor = "local", start_paused = true)]
+async fn layer2_reports_port_claimed_by_multiple_devices_without_subscribing() {
+    let remote = addr(20, 1);
+    let fake = fake_with_ports(vec![grid_port(remote, access_in_only())]);
+    let mut client = client::MidiClient::start(
+        fake.clone(),
+        midi_client_config(vec![
+            midi_device_spec(0, "grid-a", true, false),
+            midi_device_spec(1, "grid-b", true, false),
+        ]),
+    )
+    .await
+    .expect("client starts");
+
+    assert_eq!(
+        fake.take_ops(),
+        vec![
+            FakeSeqOp::EnumerateClients,
+            FakeSeqOp::EnumeratePorts { client: 20 },
+            FakeSeqOp::DropInput,
+        ]
+    );
+    assert_eq!(
+        client.next_event().await.expect("first pending event"),
+        client::MidiClientEvent::DeviceUnavailable {
+            device: MidiDeviceId::from_index(0),
+            reason: client::DeviceUnavailableReason::PortClaimedByMultipleDevices,
+        }
+    );
+    assert_eq!(
+        client.next_event().await.expect("second pending event"),
+        client::MidiClientEvent::DeviceUnavailable {
+            device: MidiDeviceId::from_index(1),
+            reason: client::DeviceUnavailableReason::PortClaimedByMultipleDevices,
+        }
+    );
 }
 
 #[tokio::test(flavor = "local", start_paused = true)]
@@ -1332,7 +1423,7 @@ async fn note_on_does_not_match_cc_binding_with_same_address() {
 }
 
 #[tokio::test(flavor = "local", start_paused = true)]
-async fn one_port_can_feed_multiple_matching_devices() {
+async fn one_port_matching_multiple_devices_is_unavailable() {
     let remote = addr(20, 1);
     let mut builder = MidiTransportFixtureBuilder::new();
     builder
@@ -1362,8 +1453,8 @@ async fn one_port_can_feed_multiple_matching_devices() {
     });
     yield_transport().await;
 
-    assert_eq!(analog_value(&running, "left"), 80.0 / 127.0);
-    assert_eq!(analog_value(&running, "right"), 80.0 / 127.0);
+    assert_eq!(analog_value(&running, "left"), 0.0);
+    assert_eq!(analog_value(&running, "right"), 0.0);
     shutdown_and_expect_ok(running).await;
 }
 
@@ -1400,7 +1491,7 @@ async fn duplicate_input_control_keys_on_one_device_use_later_binding() {
 }
 
 #[tokio::test(flavor = "local", start_paused = true)]
-async fn legacy_output_only_port_is_active_for_fake_input_dispatch() {
+async fn output_only_port_does_not_route_fake_input_dispatch() {
     let remote = addr(20, 1);
     let running = spawn_transport(
         one_cc_in_out_fixture(0.42),
@@ -1419,7 +1510,7 @@ async fn legacy_output_only_port_is_active_for_fake_input_dispatch() {
     });
     yield_transport().await;
 
-    assert_eq!(analog_value(&running, "fader"), 70.0 / 127.0);
+    assert_eq!(analog_value(&running, "fader"), 0.0);
     shutdown_and_expect_ok(running).await;
 }
 
@@ -1550,7 +1641,7 @@ async fn note_outputs_are_skipped() {
 }
 
 #[tokio::test(flavor = "local", start_paused = true)]
-async fn legacy_multiple_devices_matching_same_port_both_send_output() {
+async fn multiple_devices_matching_same_port_do_not_send_output() {
     let remote = addr(20, 1);
     let mut builder = MidiTransportFixtureBuilder::new();
     builder
@@ -1571,13 +1662,7 @@ async fn legacy_multiple_devices_matching_same_port_both_send_output() {
     running.fake.take_ops();
     finish_startup().await;
 
-    let ops = running.fake.take_ops();
-    assert_eq!(ops.first(), Some(&FakeSeqOp::DropInput));
-    assert_unordered_ops(&ops[1..3], &[sysex_op(remote), sysex_op(remote)]);
-    assert_unordered_ops(
-        &ops[3..5],
-        &[cc_op(remote, 0, 7, 42), cc_op(remote, 0, 8, 51)],
-    );
+    assert_eq!(running.fake.take_ops(), vec![FakeSeqOp::DropInput]);
     shutdown_and_expect_ok(running).await;
 }
 
@@ -1742,7 +1827,7 @@ async fn hotplug_input_only_port_does_not_force_output_republish() {
 }
 
 #[tokio::test(flavor = "local", start_paused = true)]
-async fn hotplug_output_capable_port_forces_current_output_even_without_change() {
+async fn hotplug_second_matching_port_makes_active_device_unavailable() {
     let first = addr(20, 1);
     let second = addr(20, 2);
     let running = spawn_transport(
@@ -1762,13 +1847,77 @@ async fn hotplug_output_capable_port_forces_current_output_even_without_change()
         .push_event(InputEvent::PortStart { addr: second });
     yield_transport().await;
 
-    let ops = running.fake.take_ops();
-    assert!(ops.contains(&cc_op(second, 0, 7, 42)), "ops: {ops:?}");
+    assert_eq!(
+        running.fake.take_ops(),
+        vec![
+            FakeSeqOp::LookupClient { client: 20 },
+            FakeSeqOp::LookupPort { addr: second },
+        ]
+    );
+
+    update_out(&running, "led", 0.51);
+    yield_transport().await;
+    running.fake.assert_no_new_ops();
     shutdown_and_expect_ok(running).await;
 }
 
 #[tokio::test(flavor = "local", start_paused = true)]
-async fn legacy_hotplug_additional_sendable_port_forces_output_to_all_sendable_ports() {
+async fn hotplug_ambiguity_suppresses_input_until_resolution() {
+    let first = addr(20, 1);
+    let second = addr(20, 2);
+    let running = spawn_transport(
+        one_cc_in_fixture(),
+        fake_with_ports(vec![grid_port(first, access_in_only())]),
+    )
+    .await;
+    running.fake.take_ops();
+    finish_startup().await;
+    running.fake.take_ops();
+
+    running
+        .fake
+        .add_port(20, grid_port(second, access_in_only()));
+    running
+        .fake
+        .push_event(InputEvent::PortStart { addr: second });
+    yield_transport().await;
+    assert_eq!(
+        running.fake.take_ops(),
+        vec![
+            FakeSeqOp::LookupClient { client: 20 },
+            FakeSeqOp::LookupPort { addr: second },
+        ]
+    );
+
+    running.fake.push_event(InputEvent::Controller {
+        source: first,
+        channel: 0,
+        controller: 7,
+        value: 70,
+    });
+    yield_transport().await;
+    assert_eq!(analog_value(&running, "fader"), 0.0);
+
+    running.fake.remove_port(second);
+    running
+        .fake
+        .push_event(InputEvent::PortExit { addr: second });
+    yield_transport().await;
+    running.fake.assert_no_new_ops();
+
+    running.fake.push_event(InputEvent::Controller {
+        source: first,
+        channel: 0,
+        controller: 7,
+        value: 80,
+    });
+    yield_transport().await;
+    assert_eq!(analog_value(&running, "fader"), 80.0 / 127.0);
+    shutdown_and_expect_ok(running).await;
+}
+
+#[tokio::test(flavor = "local", start_paused = true)]
+async fn hotplug_ambiguity_resolution_reattaches_remaining_port() {
     let first = addr(20, 1);
     let second = addr(20, 2);
     let running = spawn_transport(
@@ -1790,17 +1939,22 @@ async fn legacy_hotplug_additional_sendable_port_forces_output_to_all_sendable_p
 
     let ops = running.fake.take_ops();
     assert_eq!(
-        &ops[..3],
-        &[
+        ops,
+        vec![
             FakeSeqOp::LookupClient { client: 20 },
             FakeSeqOp::LookupPort { addr: second },
-            FakeSeqOp::SubscribeOutgoing { remote: second },
         ]
     );
-    assert_unordered_ops(&ops[3..5], &[sysex_op(first), sysex_op(second)]);
-    assert_unordered_ops(
-        &ops[5..7],
-        &[cc_op(first, 0, 7, 42), cc_op(second, 0, 7, 42)],
+
+    running.fake.remove_port(second);
+    running
+        .fake
+        .push_event(InputEvent::PortExit { addr: second });
+    yield_transport().await;
+
+    assert_eq!(
+        running.fake.take_ops(),
+        vec![sysex_op(first), cc_op(first, 0, 7, 42)]
     );
     shutdown_and_expect_ok(running).await;
 }
@@ -1912,7 +2066,7 @@ async fn replug_after_exit_repeats_attach_behavior_and_receives_current_output()
 #[test]
 fn prepare_devices_returns_none_for_empty_controls_on_every_device() {
     assert!(
-        prepare_devices(vec![
+        driver::prepare_driver(vec![
             MidiDeviceConfig {
                 device_key: "empty".to_owned(),
                 port_match: None,
@@ -1956,7 +2110,6 @@ async fn prepare_devices_mixed_empty_and_configured_devices_runs_transport() {
         vec![
             FakeSeqOp::EnumerateClients,
             FakeSeqOp::EnumeratePorts { client: 20 },
-            FakeSeqOp::SubscribeOutgoing { remote: empty },
             FakeSeqOp::SubscribeOutgoing { remote: configured },
         ]
     );
@@ -1965,7 +2118,6 @@ async fn prepare_devices_mixed_empty_and_configured_devices_runs_transport() {
         running.fake.take_ops(),
         vec![
             FakeSeqOp::DropInput,
-            sysex_op(empty),
             sysex_op(configured),
             cc_op(configured, 0, 7, 42),
         ]
