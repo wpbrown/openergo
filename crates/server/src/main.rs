@@ -321,7 +321,7 @@ mod listener {
         if let Ok(gid) = group_str.parse::<u32>() {
             return Ok(gid);
         }
-        users::get_group_by_name(group_str)
+        uzers::get_group_by_name(group_str)
             .map(|g| g.gid())
             .ok_or_else(|| report!("Group not found"))
             .attach(format!("group: {group_str}"))
@@ -334,9 +334,9 @@ mod listener {
         match user {
             Some(user_str) => {
                 let user = if let Ok(uid) = user_str.parse::<u32>() {
-                    users::get_user_by_uid(uid)
+                    uzers::get_user_by_uid(uid)
                 } else {
-                    users::get_user_by_name(user_str)
+                    uzers::get_user_by_name(user_str)
                 }
                 .ok_or_else(|| report!("User not found"))
                 .attach(format!("user: {user_str}"))?;
