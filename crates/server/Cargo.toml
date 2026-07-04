@@ -27,5 +27,8 @@ uzers = "0.12"
 udev = "0.9.3"
 tracing = "0.1"
 
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt", "test-util", "time"] }
+
 [features]
 tokio-console = ["shared/tokio-console"]

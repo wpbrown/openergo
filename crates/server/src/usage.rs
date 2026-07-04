@@ -161,7 +161,7 @@ impl Driver {
                 return;
             };
             let now = Instant::now();
-            next = match self.classify(&event) {
+            next = match self.classify(&event, now) {
                 Classified::Usage => self.in_batch(now).await,
                 Classified::NonUsage => self.pending_activity(now).await,
             };
@@ -179,8 +179,9 @@ impl Driver {
         loop {
             match timeout_at(publish_at, self.events_rx.recv()).await {
                 Ok(Ok(event)) => {
-                    if matches!(self.classify(&event), Classified::Usage) {
-                        self.last_usage_event = Some(Instant::now());
+                    let now = Instant::now();
+                    if matches!(self.classify(&event, now), Classified::Usage) {
+                        self.last_usage_event = Some(now);
                     }
                 }
                 Ok(Err(Closed)) => return ControlFlow::Break(()),
@@ -202,8 +203,9 @@ impl Driver {
         loop {
             match timeout_at(activity_at, self.events_rx.recv()).await {
                 Ok(Ok(event)) => {
-                    if matches!(self.classify(&event), Classified::Usage) {
-                        return self.in_batch(Instant::now()).await;
+                    let now = Instant::now();
+                    if matches!(self.classify(&event, now), Classified::Usage) {
+                        return self.in_batch(now).await;
                     }
                 }
                 Ok(Err(Closed)) => return ControlFlow::Break(()),
@@ -215,8 +217,9 @@ impl Driver {
         }
     }
 
-    fn classify(&mut self, event: &Event) -> Classified {
-        let is_usage = !self.exclude.contains(&event.label) && self.controller.handle_event(event);
+    fn classify(&mut self, event: &Event, now: Instant) -> Classified {
+        let is_usage =
+            !self.exclude.contains(&event.label) && self.controller.handle_event(event, now);
         if is_usage {
             Classified::Usage
         } else {
@@ -274,13 +277,13 @@ enum Classified {
 
 /// Tracks active drag state for a mouse button.
 struct DragTracker {
-    start_time: std::time::Instant,
+    start_time: Instant,
     distance: u32,
 }
 
 /// Tracks when a modifier key was pressed.
 struct ModifierTracker {
-    start_time: std::time::Instant,
+    start_time: Instant,
 }
 
 /// Synchronous usage logic controller.
@@ -323,12 +326,12 @@ impl Controller {
         self.snapshot.active_duration += duration;
     }
 
-    fn handle_event(&mut self, event: &Event) -> bool {
+    fn handle_event(&mut self, event: &Event, now: Instant) -> bool {
         match event.kind {
             EventKind::MouseMoveX(dx) => self.handle_mouse_move(dx),
             EventKind::MouseMoveY(dy) => self.handle_mouse_move(dy),
-            EventKind::MousePress { button, state } => self.handle_mouse_button(button, state),
-            EventKind::KeyPress { key, state } => self.handle_key(key, state),
+            EventKind::MousePress { button, state } => self.handle_mouse_button(button, state, now),
+            EventKind::KeyPress { key, state } => self.handle_key(key, state, now),
             EventKind::MouseScrollNotch(value) => self.handle_mouse_scroll(value),
             EventKind::MouseScrollHiRes(_) => false,
         }
@@ -348,8 +351,12 @@ impl Controller {
         ticks > 0
     }
 
-    fn handle_mouse_button(&mut self, button: KeyCode, button_state: ButtonState) -> bool {
-        let now = std::time::Instant::now();
+    fn handle_mouse_button(
+        &mut self,
+        button: KeyCode,
+        button_state: ButtonState,
+        now: Instant,
+    ) -> bool {
         let is_left_button = button == KeyCode::BTN_LEFT;
 
         match button_state {
@@ -384,9 +391,7 @@ impl Controller {
         }
     }
 
-    fn handle_key(&mut self, key: KeyCode, key_state: ButtonState) -> bool {
-        let now = std::time::Instant::now();
-
+    fn handle_key(&mut self, key: KeyCode, key_state: ButtonState, now: Instant) -> bool {
         if let Some((side, modifier)) = classify_modifier(key) {
             match key_state {
                 ButtonState::Down => {
@@ -483,3 +488,6 @@ fn classify_modifier(key: KeyCode) -> Option<(Side, Modifier)> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests;
