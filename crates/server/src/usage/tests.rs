@@ -74,6 +74,32 @@ impl DriverHarness {
         .await;
     }
 
+    async fn send_left_down(&mut self) {
+        self.send(
+            self.label,
+            EventKind::MousePress {
+                button: KeyCode::BTN_LEFT,
+                state: ButtonState::Down,
+            },
+        )
+        .await;
+    }
+
+    async fn send_left_up(&mut self) {
+        self.send(
+            self.label,
+            EventKind::MousePress {
+                button: KeyCode::BTN_LEFT,
+                state: ButtonState::Up,
+            },
+        )
+        .await;
+    }
+
+    async fn send_mouse_move_x(&mut self, delta: i32) {
+        self.send(self.label, EventKind::MouseMoveX(delta)).await;
+    }
+
     async fn close(mut self) {
         drop(self.producer.take());
         self.task.await.expect("usage driver panicked");
@@ -349,34 +375,139 @@ async fn follow_up_usage_within_bridge_resumes_from_last_publish() {
 async fn driver_publishes_drag_duration_from_input_stream() {
     let mut harness = DriverHarness::new(UsageConfig::default()).await;
 
-    harness
-        .send(
-            harness.label,
-            EventKind::MousePress {
-                button: KeyCode::BTN_LEFT,
-                state: ButtonState::Down,
-            },
-        )
-        .await;
+    harness.send_left_down().await;
     advance_and_yield(Duration::from_millis(50)).await;
     harness.send(harness.label, EventKind::MouseMoveX(3)).await;
     advance_and_yield(Duration::from_millis(50)).await;
     harness.send(harness.label, EventKind::MouseMoveY(-3)).await;
-    harness
-        .send(
-            harness.label,
-            EventKind::MousePress {
-                button: KeyCode::BTN_LEFT,
-                state: ButtonState::Up,
-            },
-        )
-        .await;
+    harness.send_left_up().await;
 
     advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
     let snapshot = expect_usage(&mut harness.consumer).await;
     assert_eq!(snapshot.click_count, 0);
     assert_eq!(snapshot.drag_duration, DragConfig::default().min_duration);
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
+
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "local", start_paused = true)]
+async fn qualified_drag_streams_on_fast_cadence_from_original_down() {
+    let mut harness = DriverHarness::new(UsageConfig::default()).await;
+    let movement_delay = Duration::from_millis(50);
+
+    harness.send_left_down().await;
+    advance_and_yield(movement_delay).await;
+    harness
+        .send_mouse_move_x(DragConfig::default().min_distance as i32)
+        .await;
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(snapshot.click_count, 0);
+    assert_eq!(
+        snapshot.drag_duration,
+        movement_delay + NOTIFY_RATE_LIMIT_FAST
+    );
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.drag_duration,
+        movement_delay + NOTIFY_RATE_LIMIT_FAST * 2
+    );
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 2);
+
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "local", start_paused = true)]
+async fn qualified_drag_backfills_from_original_down_after_long_pause() {
+    let mut harness = DriverHarness::new(UsageConfig::default()).await;
+    let pause_before_movement = Duration::from_secs(1);
+
+    harness.send_left_down().await;
+    advance_and_yield(pause_before_movement).await;
+    harness
+        .send_mouse_move_x(DragConfig::default().min_distance as i32)
+        .await;
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(snapshot.click_count, 0);
+    assert_eq!(
+        snapshot.drag_duration,
+        pause_before_movement + NOTIFY_RATE_LIMIT_FAST
+    );
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
+
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "local", start_paused = true)]
+async fn qualified_drag_release_after_publish_adds_only_residual_duration() {
+    let mut harness = DriverHarness::new(UsageConfig::default()).await;
+    let movement_delay = Duration::from_millis(50);
+    let residual = Duration::from_millis(40);
+
+    harness.send_left_down().await;
+    advance_and_yield(movement_delay).await;
+    harness
+        .send_mouse_move_x(DragConfig::default().min_distance as i32)
+        .await;
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.drag_duration,
+        movement_delay + NOTIFY_RATE_LIMIT_FAST
+    );
+
+    advance_and_yield(residual).await;
+    harness.send_left_up().await;
+    assert_no_event(&mut harness.consumer);
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST - residual).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.drag_duration,
+        movement_delay + NOTIFY_RATE_LIMIT_FAST + residual
+    );
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 2);
+
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "local", start_paused = true)]
+async fn modifier_and_drag_stream_together_on_shared_cadence() {
+    let mut harness = DriverHarness::new(UsageConfig::default()).await;
+    let movement_delay = Duration::from_millis(50);
+
+    harness.send_key_down(KeyCode::KEY_LEFTSHIFT).await;
+    harness.send_left_down().await;
+    advance_and_yield(movement_delay).await;
+    harness
+        .send_mouse_move_x(DragConfig::default().min_distance as i32)
+        .await;
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST - movement_delay).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        NOTIFY_RATE_LIMIT_FAST
+    );
+    assert_eq!(snapshot.drag_duration, NOTIFY_RATE_LIMIT_FAST);
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        NOTIFY_RATE_LIMIT_FAST * 2
+    );
+    assert_eq!(snapshot.drag_duration, NOTIFY_RATE_LIMIT_FAST * 2);
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 2);
 
     harness.close().await;
 }
@@ -665,7 +796,7 @@ fn left_button_drag_records_duration_and_suppresses_click_only_when_thresholds_a
         },
         start + Duration::from_millis(10)
     ));
-    assert!(!controller.handle_event(
+    assert!(controller.handle_event(
         &Event {
             label,
             kind: EventKind::MouseMoveY(-3),
@@ -708,7 +839,7 @@ fn failed_drag_thresholds_right_clicks_and_non_left_buttons_remain_clicks_on_rel
         &mouse_event(label, KeyCode::BTN_LEFT, ButtonState::Down),
         start
     ));
-    assert!(!short_drag.handle_event(
+    assert!(short_drag.handle_event(
         &Event {
             label,
             kind: EventKind::MouseMoveX(10),

@@ -187,7 +187,7 @@ impl Driver {
                 Ok(Err(Closed)) => return ControlFlow::Break(()),
                 Err(_elapsed) => {
                     self.publish_batch(batch_first, publish_at);
-                    if !self.controller.has_active_modifiers() {
+                    if !self.controller.has_streaming_usage() {
                         return ControlFlow::Continue(());
                     }
 
@@ -282,8 +282,28 @@ enum Classified {
 
 /// Tracks active drag state for a mouse button.
 struct DragTracker {
-    start_time: Instant,
+    /// Start of the currently unaccounted drag segment. This remains at
+    /// the button-down time until the drag qualifies so the first flush preserves
+    /// button-down accounting. A long pre-qualification drag can cause a burst of
+    /// duration to be accounted at once, but this is expected to be rare.
+    last_accounted: Instant,
     distance: u32,
+    qualified: bool,
+}
+
+impl DragTracker {
+    fn needs_accounting(&self, config: &DragConfig) -> bool {
+        self.qualified || self.distance >= config.min_distance
+    }
+
+    fn update_qualification(&mut self, config: &DragConfig, now: Instant) -> bool {
+        if !self.qualified {
+            self.qualified = self.distance >= config.min_distance
+                && now.saturating_duration_since(self.last_accounted) >= config.min_duration;
+        }
+
+        self.qualified
+    }
 }
 
 /// Tracks the start of the currently unaccounted modifier hold segment.
@@ -325,7 +345,12 @@ impl Controller {
 
     fn snapshot_at(&mut self, publish_at: Instant) -> UsageSnapshot {
         self.flush_active_modifiers(publish_at);
+        self.flush_active_drag(publish_at);
         self.snapshot.clone()
+    }
+
+    fn has_streaming_usage(&self) -> bool {
+        self.has_active_modifiers() || self.has_active_drag()
     }
 
     fn has_active_modifiers(&self) -> bool {
@@ -339,14 +364,20 @@ impl Controller {
             || self.right_meta.is_some()
     }
 
+    fn has_active_drag(&self) -> bool {
+        self.active_drag
+            .as_ref()
+            .is_some_and(|drag| drag.needs_accounting(&self.config))
+    }
+
     fn add_active_duration(&mut self, duration: Duration) {
         self.snapshot.active_duration += duration;
     }
 
     fn handle_event(&mut self, event: &Event, now: Instant) -> bool {
         match event.kind {
-            EventKind::MouseMoveX(dx) => self.handle_mouse_move(dx),
-            EventKind::MouseMoveY(dy) => self.handle_mouse_move(dy),
+            EventKind::MouseMoveX(dx) => self.handle_mouse_move(dx, now),
+            EventKind::MouseMoveY(dy) => self.handle_mouse_move(dy, now),
             EventKind::MousePress { button, state } => self.handle_mouse_button(button, state, now),
             EventKind::KeyPress { key, state } => self.handle_key(key, state, now),
             EventKind::MouseScrollNotch(value) => self.handle_mouse_scroll(value),
@@ -354,9 +385,15 @@ impl Controller {
         }
     }
 
-    fn handle_mouse_move(&mut self, delta: i32) -> bool {
+    fn handle_mouse_move(&mut self, delta: i32, now: Instant) -> bool {
+        let config = &self.config;
         if let Some(ref mut drag) = self.active_drag {
             drag.distance = drag.distance.saturating_add(delta.unsigned_abs());
+            let distance_ready = drag.distance >= config.min_distance;
+            if distance_ready {
+                drag.update_qualification(config, now);
+            }
+            return distance_ready;
         }
 
         false
@@ -380,24 +417,29 @@ impl Controller {
             ButtonState::Down => {
                 if is_left_button && self.active_drag.is_none() {
                     self.active_drag = Some(DragTracker {
-                        start_time: now,
+                        last_accounted: now,
                         distance: 0,
+                        qualified: false,
                     });
                 }
 
                 false
             }
             ButtonState::Up => {
-                let was_drag = is_left_button
-                    && self.active_drag.take().is_some_and(|drag| {
-                        let duration = now.duration_since(drag.start_time);
-                        let dominated_thresholds = drag.distance >= self.config.min_distance
-                            && duration >= self.config.min_duration;
-                        if dominated_thresholds {
-                            self.snapshot.drag_duration += duration;
+                let was_drag = if is_left_button {
+                    let config = &self.config;
+                    self.active_drag.take().is_some_and(|mut drag| {
+                        if drag.update_qualification(config, now) {
+                            self.snapshot.drag_duration +=
+                                now.saturating_duration_since(drag.last_accounted);
+                            true
+                        } else {
+                            false
                         }
-                        dominated_thresholds
-                    });
+                    })
+                } else {
+                    false
+                };
 
                 if !was_drag {
                     self.snapshot.click_count = self.snapshot.click_count.saturating_add(1);
@@ -405,6 +447,19 @@ impl Controller {
 
                 true
             }
+        }
+    }
+
+    fn flush_active_drag(&mut self, publish_at: Instant) {
+        let config = &self.config;
+        if let Some(drag) = &mut self.active_drag {
+            if !drag.update_qualification(config, publish_at) {
+                return;
+            }
+
+            let duration = publish_at.saturating_duration_since(drag.last_accounted);
+            drag.last_accounted = publish_at;
+            self.snapshot.drag_duration += duration;
         }
     }
 
