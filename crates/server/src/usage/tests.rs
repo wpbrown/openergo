@@ -63,6 +63,17 @@ impl DriverHarness {
         .await;
     }
 
+    async fn send_key_up(&mut self, key: KeyCode) {
+        self.send(
+            self.label,
+            EventKind::KeyPress {
+                key,
+                state: ButtonState::Up,
+            },
+        )
+        .await;
+    }
+
     async fn close(mut self) {
         drop(self.producer.take());
         self.task.await.expect("usage driver panicked");
@@ -371,6 +382,110 @@ async fn driver_publishes_drag_duration_from_input_stream() {
 }
 
 #[tokio::test(flavor = "local", start_paused = true)]
+async fn held_modifier_publishes_duration_on_each_fast_window() {
+    let mut harness = DriverHarness::new(UsageConfig::default()).await;
+
+    harness.send_key_down(KeyCode::KEY_LEFTSHIFT).await;
+    assert_no_event(&mut harness.consumer);
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        NOTIFY_RATE_LIMIT_FAST
+    );
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        NOTIFY_RATE_LIMIT_FAST * 2
+    );
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 2);
+
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "local", start_paused = true)]
+async fn modifier_release_after_published_window_adds_only_residual_duration() {
+    let mut harness = DriverHarness::new(UsageConfig::default()).await;
+    let residual = Duration::from_millis(50);
+
+    harness.send_key_down(KeyCode::KEY_LEFTSHIFT).await;
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        NOTIFY_RATE_LIMIT_FAST
+    );
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
+
+    advance_and_yield(residual).await;
+    harness.send_key_up(KeyCode::KEY_LEFTSHIFT).await;
+    assert_no_event(&mut harness.consumer);
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST - residual).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        NOTIFY_RATE_LIMIT_FAST + residual
+    );
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 2);
+
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "local", start_paused = true)]
+async fn overlapping_modifiers_flush_and_release_independently() {
+    let mut harness = DriverHarness::new(UsageConfig::default()).await;
+
+    harness.send_key_down(KeyCode::KEY_LEFTSHIFT).await;
+    harness.send_key_down(KeyCode::KEY_LEFTCTRL).await;
+
+    advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        NOTIFY_RATE_LIMIT_FAST
+    );
+    assert_eq!(snapshot.left_modifier_duration.ctrl, NOTIFY_RATE_LIMIT_FAST);
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
+
+    advance_and_yield(Duration::from_millis(50)).await;
+    harness.send_key_up(KeyCode::KEY_LEFTSHIFT).await;
+
+    advance_and_yield(Duration::from_millis(200)).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        NOTIFY_RATE_LIMIT_FAST + Duration::from_millis(50)
+    );
+    assert_eq!(
+        snapshot.left_modifier_duration.ctrl,
+        NOTIFY_RATE_LIMIT_FAST * 2
+    );
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 2);
+
+    advance_and_yield(Duration::from_millis(100)).await;
+    harness.send_key_up(KeyCode::KEY_LEFTCTRL).await;
+
+    advance_and_yield(Duration::from_millis(150)).await;
+    let snapshot = expect_usage(&mut harness.consumer).await;
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        NOTIFY_RATE_LIMIT_FAST + Duration::from_millis(50)
+    );
+    assert_eq!(
+        snapshot.left_modifier_duration.ctrl,
+        NOTIFY_RATE_LIMIT_FAST * 2 + Duration::from_millis(100)
+    );
+    assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 3);
+
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "local", start_paused = true)]
 async fn excluded_label_short_circuits_usage_classification() {
     let mut labels = DeviceLabelStore::new();
     let label = labels.get_or_intern("keyboard");
@@ -415,13 +530,18 @@ fn non_modifier_key_down_increments_key_count_and_key_up_is_ignored() {
     let now = Instant::now();
 
     assert!(controller.handle_event(&key_event(label, KeyCode::KEY_A, ButtonState::Down), now));
-    assert_eq!(controller.snapshot().key_count, 1);
+    assert_eq!(controller.snapshot_at(now).key_count, 1);
 
     assert!(!controller.handle_event(
         &key_event(label, KeyCode::KEY_A, ButtonState::Up),
         now + Duration::from_millis(10)
     ));
-    assert_eq!(controller.snapshot().key_count, 1);
+    assert_eq!(
+        controller
+            .snapshot_at(now + Duration::from_millis(10))
+            .key_count,
+        1
+    );
 }
 
 #[test]
@@ -431,7 +551,7 @@ fn modifier_down_tracks_until_matching_up_on_correct_side() {
     let start = Instant::now();
     let duration = Duration::from_millis(75);
 
-    assert!(!controller.handle_event(
+    assert!(controller.handle_event(
         &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Down),
         start
     ));
@@ -440,7 +560,7 @@ fn modifier_down_tracks_until_matching_up_on_correct_side() {
         start + duration
     ));
 
-    let snapshot = controller.snapshot();
+    let snapshot = controller.snapshot_at(start + duration);
     assert_eq!(snapshot.left_modifier_duration.shift, duration);
     assert_eq!(snapshot.right_modifier_duration.shift, Duration::ZERO);
 }
@@ -451,7 +571,7 @@ fn duplicate_modifier_down_does_not_reset_start_and_orphan_up_is_ignored() {
     let label = label();
     let start = Instant::now();
 
-    assert!(!controller.handle_event(
+    assert!(controller.handle_event(
         &key_event(label, KeyCode::KEY_LEFTCTRL, ButtonState::Down),
         start
     ));
@@ -469,7 +589,10 @@ fn duplicate_modifier_down_does_not_reset_start_and_orphan_up_is_ignored() {
     ));
 
     assert_eq!(
-        controller.snapshot().left_modifier_duration.ctrl,
+        controller
+            .snapshot_at(start + Duration::from_millis(200))
+            .left_modifier_duration
+            .ctrl,
         Duration::from_millis(100)
     );
 }
@@ -493,10 +616,10 @@ fn modifier_durations_are_tracked_independently_for_each_side_and_kind() {
         let start = Instant::now();
         let duration = Duration::from_millis(40);
 
-        assert!(!controller.handle_event(&key_event(label, key, ButtonState::Down), start));
+        assert!(controller.handle_event(&key_event(label, key, ButtonState::Down), start));
         assert!(controller.handle_event(&key_event(label, key, ButtonState::Up), start + duration));
 
-        let snapshot = controller.snapshot();
+        let snapshot = controller.snapshot_at(start + duration);
         assert_eq!(modifier_duration(&snapshot, side, modifier), duration);
         assert_eq!(
             modifier_duration(&snapshot, opposite(side), modifier),
@@ -520,7 +643,7 @@ fn mouse_button_down_is_non_usage_and_release_counts_click_without_qualifying_dr
         start + Duration::from_millis(10)
     ));
 
-    let snapshot = controller.snapshot();
+    let snapshot = controller.snapshot_at(start + Duration::from_millis(10));
     assert_eq!(snapshot.click_count, 1);
     assert_eq!(snapshot.drag_duration, Duration::ZERO);
 }
@@ -554,7 +677,7 @@ fn left_button_drag_records_duration_and_suppresses_click_only_when_thresholds_a
         start + DragConfig::default().min_duration
     ));
 
-    let snapshot = controller.snapshot();
+    let snapshot = controller.snapshot_at(start + DragConfig::default().min_duration);
     assert_eq!(snapshot.click_count, 0);
     assert_eq!(snapshot.drag_duration, DragConfig::default().min_duration);
 }
@@ -572,7 +695,7 @@ fn movement_without_active_drag_is_non_usage() {
         },
         now
     ));
-    assert_eq!(controller.snapshot().drag_duration, Duration::ZERO);
+    assert_eq!(controller.snapshot_at(now).drag_duration, Duration::ZERO);
 }
 
 #[test]
@@ -596,7 +719,12 @@ fn failed_drag_thresholds_right_clicks_and_non_left_buttons_remain_clicks_on_rel
         &mouse_event(label, KeyCode::BTN_LEFT, ButtonState::Up),
         start + Duration::from_millis(99)
     ));
-    assert_eq!(short_drag.snapshot().click_count, 1);
+    assert_eq!(
+        short_drag
+            .snapshot_at(start + Duration::from_millis(99))
+            .click_count,
+        1
+    );
 
     let mut right_click = controller_with_defaults();
     assert!(!right_click.handle_event(
@@ -607,7 +735,12 @@ fn failed_drag_thresholds_right_clicks_and_non_left_buttons_remain_clicks_on_rel
         &mouse_event(label, KeyCode::BTN_RIGHT, ButtonState::Up),
         start + Duration::from_millis(150)
     ));
-    assert_eq!(right_click.snapshot().click_count, 1);
+    assert_eq!(
+        right_click
+            .snapshot_at(start + Duration::from_millis(150))
+            .click_count,
+        1
+    );
 
     let mut middle_click = controller_with_defaults();
     assert!(!middle_click.handle_event(
@@ -618,7 +751,12 @@ fn failed_drag_thresholds_right_clicks_and_non_left_buttons_remain_clicks_on_rel
         &mouse_event(label, KeyCode::BTN_MIDDLE, ButtonState::Up),
         start + Duration::from_millis(150)
     ));
-    assert_eq!(middle_click.snapshot().click_count, 1);
+    assert_eq!(
+        middle_click
+            .snapshot_at(start + Duration::from_millis(150))
+            .click_count,
+        1
+    );
 }
 
 #[test]
@@ -641,7 +779,7 @@ fn scroll_notches_use_absolute_values_and_saturating_addition() {
         },
         now
     ));
-    assert_eq!(controller.snapshot().scroll_count, 2);
+    assert_eq!(controller.snapshot_at(now).scroll_count, 2);
 
     controller.snapshot.scroll_count = u64::MAX - 1;
     assert!(controller.handle_event(
@@ -651,7 +789,7 @@ fn scroll_notches_use_absolute_values_and_saturating_addition() {
         },
         now
     ));
-    assert_eq!(controller.snapshot().scroll_count, u64::MAX);
+    assert_eq!(controller.snapshot_at(now).scroll_count, u64::MAX);
     assert!(!controller.handle_event(
         &Event {
             label,
@@ -659,7 +797,7 @@ fn scroll_notches_use_absolute_values_and_saturating_addition() {
         },
         now
     ));
-    assert_eq!(controller.snapshot().scroll_count, u64::MAX);
+    assert_eq!(controller.snapshot_at(now).scroll_count, u64::MAX);
 }
 
 fn modifier_duration(snapshot: &UsageSnapshot, side: Side, modifier: Modifier) -> Duration {

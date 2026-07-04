@@ -172,8 +172,8 @@ impl Driver {
     /// during the batch are folded into the snapshot via `classify` but do
     /// not extend the publish deadline.
     async fn in_batch(&mut self, first_event: Instant) -> ControlFlow<()> {
-        let batch_first = self.compute_batch_start(first_event);
-        let publish_at = batch_first + NOTIFY_RATE_LIMIT_FAST;
+        let mut batch_first = self.compute_batch_start(first_event);
+        let mut publish_at = batch_first + NOTIFY_RATE_LIMIT_FAST;
         self.last_usage_event = Some(first_event);
 
         loop {
@@ -187,7 +187,12 @@ impl Driver {
                 Ok(Err(Closed)) => return ControlFlow::Break(()),
                 Err(_elapsed) => {
                     self.publish_batch(batch_first, publish_at);
-                    return ControlFlow::Continue(());
+                    if !self.controller.has_active_modifiers() {
+                        return ControlFlow::Continue(());
+                    }
+
+                    batch_first = publish_at;
+                    publish_at = batch_first + NOTIFY_RATE_LIMIT_FAST;
                 }
             }
         }
@@ -257,7 +262,7 @@ impl Driver {
     fn publish_batch(&mut self, batch_first: Instant, publish_at: Instant) {
         let active = publish_at.saturating_duration_since(batch_first);
         self.controller.add_active_duration(active);
-        let _ = self.usage_tx.set(self.controller.snapshot());
+        let _ = self.usage_tx.set(self.controller.snapshot_at(publish_at));
         self.last_publish = Some(publish_at);
         self.last_emission = Some(publish_at);
         trace!("usage driver published snapshot");
@@ -281,9 +286,9 @@ struct DragTracker {
     distance: u32,
 }
 
-/// Tracks when a modifier key was pressed.
+/// Tracks the start of the currently unaccounted modifier hold segment.
 struct ModifierTracker {
-    start_time: Instant,
+    last_accounted: Instant,
 }
 
 /// Synchronous usage logic controller.
@@ -318,8 +323,20 @@ impl Controller {
         }
     }
 
-    fn snapshot(&self) -> UsageSnapshot {
+    fn snapshot_at(&mut self, publish_at: Instant) -> UsageSnapshot {
+        self.flush_active_modifiers(publish_at);
         self.snapshot.clone()
+    }
+
+    fn has_active_modifiers(&self) -> bool {
+        self.left_shift.is_some()
+            || self.right_shift.is_some()
+            || self.left_ctrl.is_some()
+            || self.right_ctrl.is_some()
+            || self.left_alt.is_some()
+            || self.right_alt.is_some()
+            || self.left_meta.is_some()
+            || self.right_meta.is_some()
     }
 
     fn add_active_duration(&mut self, duration: Duration) {
@@ -397,13 +414,17 @@ impl Controller {
                 ButtonState::Down => {
                     let tracker = self.modifier_tracker_mut(side, modifier);
                     if tracker.is_none() {
-                        *tracker = Some(ModifierTracker { start_time: now });
+                        *tracker = Some(ModifierTracker {
+                            last_accounted: now,
+                        });
+                        true
+                    } else {
+                        false
                     }
-                    false
                 }
                 ButtonState::Up => {
                     if let Some(mt) = self.modifier_tracker_mut(side, modifier).take() {
-                        let duration = now.duration_since(mt.start_time);
+                        let duration = now.saturating_duration_since(mt.last_accounted);
                         match side {
                             Side::Left => self.add_left_modifier_duration(modifier, duration),
                             Side::Right => self.add_right_modifier_duration(modifier, duration),
@@ -420,6 +441,27 @@ impl Controller {
         } else {
             false
         }
+    }
+
+    fn flush_active_modifiers(&mut self, publish_at: Instant) {
+        macro_rules! flush_modifier {
+            ($tracker:ident, $add_duration:ident, $modifier:expr) => {
+                if let Some(tracker) = &mut self.$tracker {
+                    let duration = publish_at.saturating_duration_since(tracker.last_accounted);
+                    tracker.last_accounted = publish_at;
+                    self.$add_duration($modifier, duration);
+                }
+            };
+        }
+
+        flush_modifier!(left_shift, add_left_modifier_duration, Modifier::Shift);
+        flush_modifier!(right_shift, add_right_modifier_duration, Modifier::Shift);
+        flush_modifier!(left_ctrl, add_left_modifier_duration, Modifier::Ctrl);
+        flush_modifier!(right_ctrl, add_right_modifier_duration, Modifier::Ctrl);
+        flush_modifier!(left_alt, add_left_modifier_duration, Modifier::Alt);
+        flush_modifier!(right_alt, add_right_modifier_duration, Modifier::Alt);
+        flush_modifier!(left_meta, add_left_modifier_duration, Modifier::Meta);
+        flush_modifier!(right_meta, add_right_modifier_duration, Modifier::Meta);
     }
 
     fn add_left_modifier_duration(&mut self, modifier: Modifier, duration: Duration) {
