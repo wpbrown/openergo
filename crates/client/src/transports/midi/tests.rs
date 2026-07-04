@@ -566,6 +566,7 @@ impl MidiTransportFixtureBuilder {
         }
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn add_control(
         &mut self,
         device_idx: usize,
