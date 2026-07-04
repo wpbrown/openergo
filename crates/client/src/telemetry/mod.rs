@@ -2,7 +2,6 @@ mod instruments;
 pub mod writer;
 
 use opentelemetry::global;
-use opentelemetry_otlp::{ExportConfig, WithExportConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::metrics::periodic_reader_with_async_runtime::PeriodicReader;
@@ -14,7 +13,6 @@ use std::time::Duration;
 pub fn init() -> Result<SdkMeterProvider, Report> {
     let exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_http()
-        .with_export_config(ExportConfig::default())
         .build()
         .context("failed to create OTLP metric exporter")?;
 
