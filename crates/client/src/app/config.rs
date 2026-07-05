@@ -470,14 +470,22 @@ mod tests {
     fn credit_calculator_config_parses_and_validates() {
         let config: Config = toml::from_str(
             r#"
-            [credit.costs]
-            key = 1.5
-            click = 2.0
-            scroll = 0.25
-            drag_per_sec = 3.0
+            [credit.costs.key]
+            left = 1.5
+            right = 1.6
+
+            [credit.costs.click]
+            per_click = 2.0
+
+            [credit.costs.scroll]
+            per_scroll = 0.25
+
+            [credit.costs.drag]
+            per_sec = 3.0
 
             [credit.costs.left_modifier]
             shift_per_sec = 5.0
+            multi_per_sec = 0.5
 
             [credit.rate_boost]
             enabled = true
@@ -501,8 +509,11 @@ mod tests {
             credit.rate_boost,
             credit.global_boost,
         );
-        assert_eq!(calculator_config.costs.key, 1.5);
-        assert_eq!(calculator_config.costs.left_modifier.ctrl_per_sec, 5.0);
+        assert_eq!(calculator_config.costs.key.left, 1.5);
+        assert_eq!(calculator_config.costs.key.right, 1.6);
+        assert_eq!(calculator_config.costs.key.other, 1.0);
+        assert_eq!(calculator_config.costs.left_modifier.shift_per_sec, 5.0);
+        assert_eq!(calculator_config.costs.left_modifier.multi_per_sec, 0.5);
         assert_eq!(calculator_config.rate_boost.key.baseline_per_sec, 4.0);
     }
 
@@ -510,8 +521,8 @@ mod tests {
     fn invalid_credit_calculator_values_are_rejected() {
         let config: Config = toml::from_str(
             r#"
-            [credit.costs]
-            key = -1.0
+            [credit.costs.key]
+            left = -1.0
             "#,
         )
         .expect("config should parse");
@@ -520,7 +531,7 @@ mod tests {
             .validate()
             .expect_err("negative credit cost must error");
         assert!(
-            format!("{err}").contains("credit.costs.key"),
+            format!("{err}").contains("credit.costs.key.left"),
             "unexpected error: {err}"
         );
     }

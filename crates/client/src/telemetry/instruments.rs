@@ -1,5 +1,7 @@
 use crate::credit::limit::CreditLimitConsumer;
-use crate::credit::{CreditDelta, CreditIncrement, ModifierCreditDelta, SplitCreditSnapshot};
+use crate::credit::{
+    CreditDelta, CreditIncrement, KeyCreditDelta, ModifierCreditDelta, SplitCreditSnapshot,
+};
 use crate::pain::PainConsumer;
 use opentelemetry::metrics::{Counter, Gauge};
 use opentelemetry::{KeyValue, global};
@@ -87,7 +89,7 @@ impl Instruments {
         self.clicks.add(delta.click_count, &[]);
         self.drag_duration
             .add(delta.drag_duration.as_secs_f64(), &[]);
-        self.key_presses.add(delta.key_count.total(), &[]);
+        self.key_presses.add(delta.key_event_count(), &[]);
         self.scroll_ticks.add(delta.scroll_count, &[]);
 
         self.record_modifier_duration("left", &delta.left_modifier_duration);
@@ -104,6 +106,8 @@ impl Instruments {
             .add(delta.alt.as_secs_f64(), &attrs("alt"));
         self.modifier_duration
             .add(delta.meta.as_secs_f64(), &attrs("meta"));
+        self.modifier_duration
+            .add(delta.multi.as_secs_f64(), &attrs("multi"));
     }
 
     pub fn record_credit(&self, increment: &CreditIncrement) {
@@ -117,12 +121,32 @@ impl Instruments {
         self.credit_all
             .add(delta.drag.as_f64(), &credit_attrs(credit_type, "drag"));
         self.credit_all
-            .add(delta.key.as_f64(), &credit_attrs(credit_type, "key"));
-        self.credit_all
             .add(delta.scroll.as_f64(), &credit_attrs(credit_type, "scroll"));
 
+        self.record_key_credit(credit_type, &delta.key);
         self.record_modifier_credit(credit_type, "left", &delta.left_modifier);
         self.record_modifier_credit(credit_type, "right", &delta.right_modifier);
+    }
+
+    fn record_key_credit(&self, credit_type: &'static str, delta: &KeyCreditDelta) {
+        let attrs = |key: &'static str| {
+            [
+                KeyValue::new("type", credit_type),
+                KeyValue::new("source", "key"),
+                KeyValue::new("key", key),
+            ]
+        };
+        self.credit_all.add(delta.left.as_f64(), &attrs("left"));
+        self.credit_all.add(delta.right.as_f64(), &attrs("right"));
+        self.credit_all.add(delta.other.as_f64(), &attrs("other"));
+        self.credit_all
+            .add(delta.left_combo.as_f64(), &attrs("left_combo"));
+        self.credit_all
+            .add(delta.right_combo.as_f64(), &attrs("right_combo"));
+        self.credit_all
+            .add(delta.cross_combo.as_f64(), &attrs("cross_combo"));
+        self.credit_all
+            .add(delta.other_combo.as_f64(), &attrs("other_combo"));
     }
 
     fn record_modifier_credit(
@@ -143,6 +167,7 @@ impl Instruments {
         self.credit_all.add(delta.ctrl.as_f64(), &attrs("ctrl"));
         self.credit_all.add(delta.alt.as_f64(), &attrs("alt"));
         self.credit_all.add(delta.meta.as_f64(), &attrs("meta"));
+        self.credit_all.add(delta.multi.as_f64(), &attrs("multi"));
     }
 
     pub fn record_credit_gauges(

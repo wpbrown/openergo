@@ -22,7 +22,13 @@ struct OpenUsageCreditBucket {
     credit: CreditIncrement,
     increment_count: u32,
     active_increment_count: u32,
-    max_increment_key_count: u64,
+    max_increment_key_left_count: u64,
+    max_increment_key_right_count: u64,
+    max_increment_key_other_count: u64,
+    max_increment_left_combo_count: u64,
+    max_increment_right_combo_count: u64,
+    max_increment_cross_combo_count: u64,
+    max_increment_other_combo_count: u64,
     max_increment_click_count: u64,
     max_increment_scroll_count: u64,
     max_increment_total_credit: Credit,
@@ -41,7 +47,13 @@ impl OpenUsageCreditBucket {
             credit: CreditIncrement::default(),
             increment_count: 0,
             active_increment_count: 0,
-            max_increment_key_count: 0,
+            max_increment_key_left_count: 0,
+            max_increment_key_right_count: 0,
+            max_increment_key_other_count: 0,
+            max_increment_left_combo_count: 0,
+            max_increment_right_combo_count: 0,
+            max_increment_cross_combo_count: 0,
+            max_increment_other_combo_count: 0,
             max_increment_click_count: 0,
             max_increment_scroll_count: 0,
             max_increment_total_credit: Credit::ZERO,
@@ -62,7 +74,24 @@ impl OpenUsageCreditBucket {
         self.last_increment_end = increment.end;
         self.observed_duration += increment.end.duration_since(increment.start).unsigned_abs();
 
-        self.max_increment_key_count = self.max_increment_key_count.max(delta.key_count.total());
+        self.max_increment_key_left_count =
+            self.max_increment_key_left_count.max(delta.key_count.left);
+        self.max_increment_key_right_count = self
+            .max_increment_key_right_count
+            .max(delta.key_count.right);
+        self.max_increment_key_other_count = self
+            .max_increment_key_other_count
+            .max(delta.key_count.other);
+        self.max_increment_left_combo_count = self
+            .max_increment_left_combo_count
+            .max(delta.left_modifier_duration.combo);
+        self.max_increment_right_combo_count = self
+            .max_increment_right_combo_count
+            .max(delta.right_modifier_duration.combo);
+        self.max_increment_cross_combo_count =
+            self.max_increment_cross_combo_count.max(delta.cross_combo);
+        self.max_increment_other_combo_count =
+            self.max_increment_other_combo_count.max(delta.other_combo);
         self.max_increment_click_count = self.max_increment_click_count.max(delta.click_count);
         self.max_increment_scroll_count = self.max_increment_scroll_count.max(delta.scroll_count);
 
@@ -89,42 +118,72 @@ impl OpenUsageCreditBucket {
             increment_count: self.increment_count,
             u_click_count: self.usage.click_count,
             u_drag: self.usage.drag_duration,
-            u_key_count: self.usage.key_count.total(),
+            u_key_left_count: self.usage.key_count.left,
+            u_key_right_count: self.usage.key_count.right,
+            u_key_other_count: self.usage.key_count.other,
+            u_left_combo_count: self.usage.left_modifier_duration.combo,
+            u_right_combo_count: self.usage.right_modifier_duration.combo,
+            u_cross_combo_count: self.usage.cross_combo,
+            u_other_combo_count: self.usage.other_combo,
             u_scroll_count: self.usage.scroll_count,
             u_left_shift: self.usage.left_modifier_duration.shift,
             u_left_ctrl: self.usage.left_modifier_duration.ctrl,
             u_left_alt: self.usage.left_modifier_duration.alt,
             u_left_meta: self.usage.left_modifier_duration.meta,
+            u_left_multi: self.usage.left_modifier_duration.multi,
             u_right_shift: self.usage.right_modifier_duration.shift,
             u_right_ctrl: self.usage.right_modifier_duration.ctrl,
             u_right_alt: self.usage.right_modifier_duration.alt,
             u_right_meta: self.usage.right_modifier_duration.meta,
+            u_right_multi: self.usage.right_modifier_duration.multi,
             u_active: self.usage.active_duration,
             cb_click: self.credit.base.click,
             cb_drag: self.credit.base.drag,
-            cb_key: self.credit.base.key,
+            cb_key_left: self.credit.base.key.left,
+            cb_key_right: self.credit.base.key.right,
+            cb_key_other: self.credit.base.key.other,
+            cb_key_left_combo: self.credit.base.key.left_combo,
+            cb_key_right_combo: self.credit.base.key.right_combo,
+            cb_key_cross_combo: self.credit.base.key.cross_combo,
+            cb_key_other_combo: self.credit.base.key.other_combo,
             cb_scroll: self.credit.base.scroll,
             cb_left_shift: self.credit.base.left_modifier.shift,
             cb_left_ctrl: self.credit.base.left_modifier.ctrl,
             cb_left_alt: self.credit.base.left_modifier.alt,
             cb_left_meta: self.credit.base.left_modifier.meta,
+            cb_left_multi: self.credit.base.left_modifier.multi,
             cb_right_shift: self.credit.base.right_modifier.shift,
             cb_right_ctrl: self.credit.base.right_modifier.ctrl,
             cb_right_alt: self.credit.base.right_modifier.alt,
             cb_right_meta: self.credit.base.right_modifier.meta,
+            cb_right_multi: self.credit.base.right_modifier.multi,
             cx_click: self.credit.boost.click,
             cx_drag: self.credit.boost.drag,
-            cx_key: self.credit.boost.key,
+            cx_key_left: self.credit.boost.key.left,
+            cx_key_right: self.credit.boost.key.right,
+            cx_key_other: self.credit.boost.key.other,
+            cx_key_left_combo: self.credit.boost.key.left_combo,
+            cx_key_right_combo: self.credit.boost.key.right_combo,
+            cx_key_cross_combo: self.credit.boost.key.cross_combo,
+            cx_key_other_combo: self.credit.boost.key.other_combo,
             cx_scroll: self.credit.boost.scroll,
             cx_left_shift: self.credit.boost.left_modifier.shift,
             cx_left_ctrl: self.credit.boost.left_modifier.ctrl,
             cx_left_alt: self.credit.boost.left_modifier.alt,
             cx_left_meta: self.credit.boost.left_modifier.meta,
+            cx_left_multi: self.credit.boost.left_modifier.multi,
             cx_right_shift: self.credit.boost.right_modifier.shift,
             cx_right_ctrl: self.credit.boost.right_modifier.ctrl,
             cx_right_alt: self.credit.boost.right_modifier.alt,
             cx_right_meta: self.credit.boost.right_modifier.meta,
-            max_increment_key_count: self.max_increment_key_count,
+            cx_right_multi: self.credit.boost.right_modifier.multi,
+            max_increment_key_left_count: self.max_increment_key_left_count,
+            max_increment_key_right_count: self.max_increment_key_right_count,
+            max_increment_key_other_count: self.max_increment_key_other_count,
+            max_increment_left_combo_count: self.max_increment_left_combo_count,
+            max_increment_right_combo_count: self.max_increment_right_combo_count,
+            max_increment_cross_combo_count: self.max_increment_cross_combo_count,
+            max_increment_other_combo_count: self.max_increment_other_combo_count,
             max_increment_click_count: self.max_increment_click_count,
             max_increment_scroll_count: self.max_increment_scroll_count,
             max_increment_total_credit: self.max_increment_total_credit,
@@ -187,7 +246,7 @@ impl UsageCreditBucketBuilder {
 /// Whether a usage delta represents any tracked input.
 fn usage_is_active(delta: &UsageDelta) -> bool {
     delta.click_count != 0
-        || delta.key_count.total() != 0
+        || delta.key_event_count() != 0
         || delta.scroll_count != 0
         || !delta.drag_duration.is_zero()
         || !delta.active_duration.is_zero()
@@ -196,7 +255,8 @@ fn usage_is_active(delta: &UsageDelta) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::KeyCount;
+    use crate::credit::KeyCreditDelta;
+    use shared::model::{KeyCount, ModifierUsageDelta};
 
     fn ts(millis: i64) -> Timestamp {
         Timestamp::UNIX_EPOCH + SignedDuration::from_millis(millis)
@@ -219,9 +279,16 @@ mod tests {
     /// credit is exactly `base + boost`.
     fn credit(base: f64, boost: f64) -> CreditIncrement {
         let mut increment = CreditIncrement::default();
-        increment.base.key = Credit::new(base);
-        increment.boost.key = Credit::new(boost);
+        increment.base.key.left = Credit::new(base);
+        increment.boost.key.left = Credit::new(boost);
         increment
+    }
+
+    fn increment(start_ms: i64, end_ms: i64, mut delta: UsageDelta) -> UsageIncrement {
+        if delta.active_duration.is_zero() {
+            delta.active_duration = Duration::from_millis((end_ms - start_ms) as u64);
+        }
+        UsageIncrement::new(delta, ts(start_ms), ts(end_ms))
     }
 
     #[test]
@@ -243,13 +310,130 @@ mod tests {
         let bucket = builder.finish().expect("non-empty bucket");
         assert_eq!(bucket.increment_count, 3);
         assert_eq!(bucket.active_increment_count, 3);
-        assert_eq!(bucket.u_key_count, 10);
+        assert_eq!(bucket.u_key_left_count, 10);
         assert_eq!(bucket.bucket_start, ts(0));
         assert_eq!(bucket.bucket_end, ts(3000));
-        // base.key totals: 1.0 + 2.0 + 0.5; boost.key totals: 0.5 + 0.0 + 0.25
-        assert_eq!(bucket.cb_key.as_f64(), 3.5);
-        assert_eq!(bucket.cx_key.as_f64(), 0.75);
+        // base key-left totals: 1.0 + 2.0 + 0.5; boost key-left totals: 0.5 + 0.0 + 0.25
+        assert_eq!(bucket.cb_key_left.as_f64(), 3.5);
+        assert_eq!(bucket.cx_key_left.as_f64(), 0.75);
         assert_eq!(bucket.observed_duration, Duration::from_millis(3000));
+    }
+
+    #[test]
+    fn records_split_key_combo_and_multi_burst_usage() {
+        let mut builder = UsageCreditBucketBuilder::new();
+
+        let first = increment(
+            0,
+            1000,
+            UsageDelta {
+                key_count: KeyCount {
+                    left: 2,
+                    right: 1,
+                    other: 0,
+                },
+                cross_combo: 1,
+                left_modifier_duration: ModifierUsageDelta {
+                    combo: 3,
+                    multi: Duration::from_millis(100),
+                    ..ModifierUsageDelta::default()
+                },
+                ..UsageDelta::default()
+            },
+        );
+        let second = increment(
+            1000,
+            2000,
+            UsageDelta {
+                key_count: KeyCount {
+                    left: 1,
+                    right: 4,
+                    other: 5,
+                },
+                cross_combo: 7,
+                other_combo: 8,
+                right_modifier_duration: ModifierUsageDelta {
+                    combo: 2,
+                    multi: Duration::from_millis(200),
+                    ..ModifierUsageDelta::default()
+                },
+                ..UsageDelta::default()
+            },
+        );
+
+        let mut first_credit = CreditIncrement::default();
+        first_credit.base.key = KeyCreditDelta {
+            left: Credit::new(1.0),
+            right: Credit::new(2.0),
+            other: Credit::new(3.0),
+            left_combo: Credit::new(4.0),
+            right_combo: Credit::new(5.0),
+            cross_combo: Credit::new(6.0),
+            other_combo: Credit::new(7.0),
+        };
+        first_credit.boost.key = KeyCreditDelta {
+            left: Credit::new(1.0),
+            right: Credit::new(2.0),
+            other: Credit::new(3.0),
+            left_combo: Credit::new(4.0),
+            right_combo: Credit::new(5.0),
+            cross_combo: Credit::new(6.0),
+            other_combo: Credit::new(7.0),
+        };
+        let mut second_credit = CreditIncrement::default();
+        second_credit.base.key = KeyCreditDelta {
+            left: Credit::new(10.0),
+            right: Credit::new(20.0),
+            other: Credit::new(30.0),
+            left_combo: Credit::new(40.0),
+            right_combo: Credit::new(50.0),
+            cross_combo: Credit::new(60.0),
+            other_combo: Credit::new(70.0),
+        };
+        second_credit.boost.key = KeyCreditDelta {
+            left: Credit::new(10.0),
+            right: Credit::new(20.0),
+            other: Credit::new(30.0),
+            left_combo: Credit::new(40.0),
+            right_combo: Credit::new(50.0),
+            cross_combo: Credit::new(60.0),
+            other_combo: Credit::new(70.0),
+        };
+
+        builder.push(&first, &first_credit);
+        builder.push(&second, &second_credit);
+
+        let bucket = builder.finish().expect("non-empty bucket");
+        assert_eq!(bucket.u_key_left_count, 3);
+        assert_eq!(bucket.u_key_right_count, 5);
+        assert_eq!(bucket.u_key_other_count, 5);
+        assert_eq!(bucket.u_left_combo_count, 3);
+        assert_eq!(bucket.u_right_combo_count, 2);
+        assert_eq!(bucket.u_cross_combo_count, 8);
+        assert_eq!(bucket.u_other_combo_count, 8);
+        assert_eq!(bucket.u_left_multi, Duration::from_millis(100));
+        assert_eq!(bucket.u_right_multi, Duration::from_millis(200));
+        assert_eq!(bucket.max_increment_key_left_count, 2);
+        assert_eq!(bucket.max_increment_key_right_count, 4);
+        assert_eq!(bucket.max_increment_key_other_count, 5);
+        assert_eq!(bucket.max_increment_left_combo_count, 3);
+        assert_eq!(bucket.max_increment_right_combo_count, 2);
+        assert_eq!(bucket.max_increment_cross_combo_count, 7);
+        assert_eq!(bucket.max_increment_other_combo_count, 8);
+        assert_eq!(bucket.cb_key_left, Credit::new(11.0));
+        assert_eq!(bucket.cb_key_right, Credit::new(22.0));
+        assert_eq!(bucket.cb_key_other, Credit::new(33.0));
+        assert_eq!(bucket.cb_key_left_combo, Credit::new(44.0));
+        assert_eq!(bucket.cb_key_right_combo, Credit::new(55.0));
+        assert_eq!(bucket.cb_key_cross_combo, Credit::new(66.0));
+        assert_eq!(bucket.cb_key_other_combo, Credit::new(77.0));
+        assert_eq!(bucket.cx_key_left, Credit::new(11.0));
+        assert_eq!(bucket.cx_key_right, Credit::new(22.0));
+        assert_eq!(bucket.cx_key_other, Credit::new(33.0));
+        assert_eq!(bucket.cx_key_left_combo, Credit::new(44.0));
+        assert_eq!(bucket.cx_key_right_combo, Credit::new(55.0));
+        assert_eq!(bucket.cx_key_cross_combo, Credit::new(66.0));
+        assert_eq!(bucket.cx_key_other_combo, Credit::new(77.0));
     }
 
     #[test]
@@ -291,12 +475,12 @@ mod tests {
             .push(&keys(1000, 9000, 4), &credit(2.0, 0.0))
             .expect("first bucket finalized");
         assert_eq!(first.increment_count, 1);
-        assert_eq!(first.u_key_count, 1);
+        assert_eq!(first.u_key_left_count, 1);
 
         let second = builder.finish().expect("second bucket");
         assert_eq!(second.bucket_start, ts(1000));
         assert_eq!(second.bucket_end, ts(9000));
-        assert_eq!(second.u_key_count, 4);
+        assert_eq!(second.u_key_left_count, 4);
     }
 
     #[test]
@@ -308,7 +492,7 @@ mod tests {
         builder.push(&keys(2000, 3000, 4), &credit(0.0, 0.5)); // total 0.5
 
         let bucket = builder.finish().expect("non-empty bucket");
-        assert_eq!(bucket.max_increment_key_count, 7);
+        assert_eq!(bucket.max_increment_key_left_count, 7);
         assert_eq!(bucket.max_increment_total_credit, Credit::new(3.0));
         // 1.0^2 + 3.0^2 + 0.5^2 = 1 + 9 + 0.25
         assert_eq!(

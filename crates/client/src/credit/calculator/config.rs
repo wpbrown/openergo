@@ -35,17 +35,17 @@ impl Default for CreditCalculatorConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreditCostConfig {
-    #[serde(default = "default_key_cost")]
-    pub key: f64,
-    #[serde(default = "default_click_cost")]
-    pub click: f64,
-    #[serde(default = "default_scroll_cost")]
-    pub scroll: f64,
-    #[serde(default = "default_drag_cost")]
-    pub drag_per_sec: f64,
+    #[serde(default)]
+    pub key: KeyCostConfig,
+    #[serde(default)]
+    pub click: ClickCostConfig,
+    #[serde(default)]
+    pub scroll: ScrollCostConfig,
+    #[serde(default)]
+    pub drag: DragCostConfig,
     #[serde(default)]
     pub left_modifier: ModifierCostConfig,
     #[serde(default)]
@@ -54,14 +54,10 @@ pub struct CreditCostConfig {
 
 impl CreditCostConfig {
     fn validate(&self) -> Result<(), Report> {
-        for (field, value) in [
-            ("credit.costs.key", self.key),
-            ("credit.costs.click", self.click),
-            ("credit.costs.scroll", self.scroll),
-            ("credit.costs.drag_per_sec", self.drag_per_sec),
-        ] {
-            validate_non_negative_finite(field, value)?;
-        }
+        self.key.validate("credit.costs.key")?;
+        self.click.validate("credit.costs.click")?;
+        self.scroll.validate("credit.costs.scroll")?;
+        self.drag.validate("credit.costs.drag")?;
         self.left_modifier.validate("credit.costs.left_modifier")?;
         self.right_modifier
             .validate("credit.costs.right_modifier")?;
@@ -69,15 +65,115 @@ impl CreditCostConfig {
     }
 }
 
-impl Default for CreditCostConfig {
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyCostConfig {
+    #[serde(default = "default_key_cost")]
+    pub left: f64,
+    #[serde(default = "default_key_cost")]
+    pub right: f64,
+    #[serde(default = "default_key_cost")]
+    pub other: f64,
+    #[serde(default = "default_same_hand_combo_cost")]
+    pub left_combo: f64,
+    #[serde(default = "default_same_hand_combo_cost")]
+    pub right_combo: f64,
+    #[serde(default = "default_other_hand_combo_cost")]
+    pub cross_combo: f64,
+    #[serde(default = "default_other_hand_combo_cost")]
+    pub other_combo: f64,
+}
+
+impl KeyCostConfig {
+    fn validate(&self, prefix: &str) -> Result<(), Report> {
+        for (field, value) in [
+            ("left", self.left),
+            ("right", self.right),
+            ("other", self.other),
+            ("left_combo", self.left_combo),
+            ("right_combo", self.right_combo),
+            ("cross_combo", self.cross_combo),
+            ("other_combo", self.other_combo),
+        ] {
+            validate_non_negative_finite(&format!("{prefix}.{field}"), value)?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for KeyCostConfig {
     fn default() -> Self {
         Self {
-            key: default_key_cost(),
-            click: default_click_cost(),
-            scroll: default_scroll_cost(),
-            drag_per_sec: default_drag_cost(),
-            left_modifier: ModifierCostConfig::default(),
-            right_modifier: ModifierCostConfig::default(),
+            left: default_key_cost(),
+            right: default_key_cost(),
+            other: default_key_cost(),
+            left_combo: default_same_hand_combo_cost(),
+            right_combo: default_same_hand_combo_cost(),
+            cross_combo: default_other_hand_combo_cost(),
+            other_combo: default_other_hand_combo_cost(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClickCostConfig {
+    #[serde(default = "default_click_cost")]
+    pub per_click: f64,
+}
+
+impl ClickCostConfig {
+    fn validate(&self, prefix: &str) -> Result<(), Report> {
+        validate_non_negative_finite(&format!("{prefix}.per_click"), self.per_click)
+    }
+}
+
+impl Default for ClickCostConfig {
+    fn default() -> Self {
+        Self {
+            per_click: default_click_cost(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScrollCostConfig {
+    #[serde(default = "default_scroll_cost")]
+    pub per_scroll: f64,
+}
+
+impl ScrollCostConfig {
+    fn validate(&self, prefix: &str) -> Result<(), Report> {
+        validate_non_negative_finite(&format!("{prefix}.per_scroll"), self.per_scroll)
+    }
+}
+
+impl Default for ScrollCostConfig {
+    fn default() -> Self {
+        Self {
+            per_scroll: default_scroll_cost(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DragCostConfig {
+    #[serde(default = "default_drag_cost")]
+    pub per_sec: f64,
+}
+
+impl DragCostConfig {
+    fn validate(&self, prefix: &str) -> Result<(), Report> {
+        validate_non_negative_finite(&format!("{prefix}.per_sec"), self.per_sec)
+    }
+}
+
+impl Default for DragCostConfig {
+    fn default() -> Self {
+        Self {
+            per_sec: default_drag_cost(),
         }
     }
 }
@@ -93,6 +189,8 @@ pub struct ModifierCostConfig {
     pub alt_per_sec: f64,
     #[serde(default = "default_meta_cost")]
     pub meta_per_sec: f64,
+    #[serde(default = "default_multi_cost")]
+    pub multi_per_sec: f64,
 }
 
 impl ModifierCostConfig {
@@ -102,6 +200,7 @@ impl ModifierCostConfig {
             ("ctrl_per_sec", self.ctrl_per_sec),
             ("alt_per_sec", self.alt_per_sec),
             ("meta_per_sec", self.meta_per_sec),
+            ("multi_per_sec", self.multi_per_sec),
         ] {
             validate_non_negative_finite(&format!("{prefix}.{field}"), value)?;
         }
@@ -116,6 +215,7 @@ impl Default for ModifierCostConfig {
             ctrl_per_sec: default_ctrl_cost(),
             alt_per_sec: default_alt_cost(),
             meta_per_sec: default_meta_cost(),
+            multi_per_sec: default_multi_cost(),
         }
     }
 }
@@ -402,6 +502,14 @@ fn default_key_cost() -> f64 {
     1.0
 }
 
+fn default_same_hand_combo_cost() -> f64 {
+    1.25
+}
+
+fn default_other_hand_combo_cost() -> f64 {
+    1.10
+}
+
 fn default_click_cost() -> f64 {
     2.0
 }
@@ -428,6 +536,10 @@ fn default_alt_cost() -> f64 {
 
 fn default_meta_cost() -> f64 {
     3.0
+}
+
+fn default_multi_cost() -> f64 {
+    1.0
 }
 
 fn default_rate_enabled() -> bool {

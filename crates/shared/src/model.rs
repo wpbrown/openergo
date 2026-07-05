@@ -88,6 +88,22 @@ impl Add<&UsageDelta> for UsageDelta {
     }
 }
 
+impl UsageDelta {
+    /// Count every non-modifier key event represented by this delta.
+    ///
+    /// Combo counters are mutually exclusive with `key_count` on the server,
+    /// so callers that need the keyboard-event aggregate should use this
+    /// instead of `key_count.total()`.
+    pub fn key_event_count(&self) -> u64 {
+        self.key_count
+            .total()
+            .saturating_add(self.left_modifier_duration.combo)
+            .saturating_add(self.right_modifier_duration.combo)
+            .saturating_add(self.cross_combo)
+            .saturating_add(self.other_combo)
+    }
+}
+
 impl AddAssign<&ModifierUsageDelta> for ModifierUsageDelta {
     fn add_assign(&mut self, delta: &ModifierUsageDelta) {
         self.shift += delta.shift;
