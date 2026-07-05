@@ -123,7 +123,7 @@ where
                 sound_player.play(assets::CLICK);
             }
             Ok(ServerMessage::NewUsage(increment)) => {
-                trace!(increment = ?increment, "new usage");
+                trace!(increment = %increment, "new usage");
                 let _ = usage_producer.send(*increment).await;
             }
             Ok(ServerMessage::Activity) => {

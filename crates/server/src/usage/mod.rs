@@ -1,3 +1,5 @@
+pub mod key_hand;
+
 use crate::device_events::{ButtonState, DeviceLabel, Event, EventKind};
 use bachelor::broadcast::spmc::SpmcBroadcastConsumer;
 use bachelor::error::Closed;
@@ -8,6 +10,7 @@ use bachelor::watch::{MpmcWatchRefConsumer, MpmcWatchRefProducer, MpmcWatchRefSo
 use evdev::KeyCode;
 use futures::FutureExt;
 use futures::future::{Either, select};
+use key_hand::{KeyHand, KeyHandUsageConfig};
 use shared::model::{ModifierUsageSnapshot, UsageSnapshot};
 use std::future::Future;
 use std::ops::ControlFlow;
@@ -37,6 +40,7 @@ pub struct UsageConfig {
     /// to be small (a handful of entries), so a linear scan beats the
     /// overhead of a hash set.
     pub exclude: Vec<DeviceLabel>,
+    pub key_hand: KeyHandUsageConfig,
 }
 
 #[derive(Clone, Copy)]
@@ -142,12 +146,13 @@ impl Driver {
         usage_tx: MpmcWatchRefProducer<UsageSnapshot>,
         activity_tx: MpmcLatchedSignalProducer,
     ) -> Self {
+        let UsageConfig { exclude, key_hand } = config;
         Self {
             events_rx,
             usage_tx,
             activity_tx,
-            controller: Controller::new(drag),
-            exclude: config.exclude,
+            controller: Controller::new(drag, key_hand),
+            exclude,
             last_usage_event: None,
             last_publish: None,
             last_emission: None,
@@ -314,6 +319,7 @@ struct ModifierTracker {
 /// Synchronous usage logic controller.
 struct Controller {
     config: DragConfig,
+    key_hand: KeyHandUsageConfig,
     snapshot: UsageSnapshot,
     active_drag: Option<DragTracker>,
     left_shift: Option<ModifierTracker>,
@@ -327,9 +333,10 @@ struct Controller {
 }
 
 impl Controller {
-    fn new(config: DragConfig) -> Self {
+    fn new(config: DragConfig, key_hand: KeyHandUsageConfig) -> Self {
         Self {
             config,
+            key_hand,
             snapshot: UsageSnapshot::default(),
             active_drag: None,
             left_shift: None,
@@ -379,7 +386,7 @@ impl Controller {
             EventKind::MouseMoveX(dx) => self.handle_mouse_move(dx, now),
             EventKind::MouseMoveY(dy) => self.handle_mouse_move(dy, now),
             EventKind::MousePress { button, state } => self.handle_mouse_button(button, state, now),
-            EventKind::KeyPress { key, state } => self.handle_key(key, state, now),
+            EventKind::KeyPress { key, state } => self.handle_key(event.label, key, state, now),
             EventKind::MouseScrollNotch(value) => self.handle_mouse_scroll(value),
             EventKind::MouseScrollHiRes(_) => false,
         }
@@ -463,7 +470,13 @@ impl Controller {
         }
     }
 
-    fn handle_key(&mut self, key: KeyCode, key_state: ButtonState, now: Instant) -> bool {
+    fn handle_key(
+        &mut self,
+        label: DeviceLabel,
+        key: KeyCode,
+        key_state: ButtonState,
+        now: Instant,
+    ) -> bool {
         if let Some((side, modifier)) = classify_modifier(key) {
             match key_state {
                 ButtonState::Down => {
@@ -491,7 +504,12 @@ impl Controller {
                 }
             }
         } else if key_state == ButtonState::Down {
-            self.snapshot.key_count = self.snapshot.key_count.saturating_add(1);
+            let key_count = match self.key_hand.classifier_for(label).classify(key) {
+                KeyHand::Left => &mut self.snapshot.key_count.left,
+                KeyHand::Right => &mut self.snapshot.key_count.right,
+                KeyHand::Other => &mut self.snapshot.key_count.other,
+            };
+            *key_count = key_count.saturating_add(1);
             true
         } else {
             false

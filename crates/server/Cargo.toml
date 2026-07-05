@@ -20,6 +20,7 @@ postcard = { version = "1", features = ["alloc", "use-std"] }
 rootcause = "0.12"
 shared = { path = "../shared", features = ["systemd"] }
 serde = { version = "1", features = ["derive"] }
+smallvec = { version = "1", features = ["const_generics"] }
 tokio = { version = "1.52.3", features = ["rt", "net", "time"] }
 toml = "0.8"
 tokio-util = { version = "0.7", features = ["codec"] }

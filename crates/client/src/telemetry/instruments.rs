@@ -87,7 +87,7 @@ impl Instruments {
         self.clicks.add(delta.click_count, &[]);
         self.drag_duration
             .add(delta.drag_duration.as_secs_f64(), &[]);
-        self.key_presses.add(delta.key_count, &[]);
+        self.key_presses.add(delta.key_count.total(), &[]);
         self.scroll_ticks.add(delta.scroll_count, &[]);
 
         self.record_modifier_duration("left", &delta.left_modifier_duration);

@@ -42,7 +42,7 @@ impl CreditCalculator {
         let key_boost_fraction = self
             .local_rates
             .key
-            .boost_fraction(delta.key_count as f64 / dt, dt);
+            .boost_fraction(delta.key_count.total() as f64 / dt, dt);
         let click_boost_fraction = self
             .local_rates
             .click
@@ -192,7 +192,7 @@ fn boost_fraction(rate: f64, baseline: f64, factor: f64, cap: f64) -> f64 {
 fn base_credit(increment: &UsageIncrement, costs: &CreditCostConfig) -> CreditDelta {
     let delta = &increment.delta;
     CreditDelta {
-        key: Credit::new(delta.key_count as f64 * costs.key),
+        key: Credit::new(delta.key_count.total() as f64 * costs.key),
         click: Credit::new(delta.click_count as f64 * costs.click),
         scroll: Credit::new(delta.scroll_count as f64 * costs.scroll),
         drag: Credit::new(delta.drag_duration.as_secs_f64() * costs.drag_per_sec),
@@ -222,8 +222,15 @@ mod tests {
     use super::config::*;
     use super::*;
     use jiff::Timestamp;
-    use shared::model::UsageDelta;
+    use shared::model::{KeyCount, UsageDelta};
     use std::time::Duration;
+
+    fn key_count(total: u64) -> KeyCount {
+        KeyCount {
+            left: total,
+            ..KeyCount::default()
+        }
+    }
 
     fn unboosted_config() -> CreditCalculatorConfig {
         let mut config = CreditCalculatorConfig::default();
@@ -258,7 +265,7 @@ mod tests {
     fn base_credit_is_linear_in_usage_amount() {
         let mut calculator = CreditCalculator::new(unboosted_config());
         let delta = UsageDelta {
-            key_count: 3,
+            key_count: key_count(3),
             click_count: 2,
             scroll_count: 8,
             drag_duration: Duration::from_secs(2),
@@ -298,7 +305,7 @@ mod tests {
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                key_count: 2,
+                key_count: key_count(2),
                 click_count: 1,
                 ..UsageDelta::default()
             },
@@ -324,7 +331,7 @@ mod tests {
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                key_count: 10,
+                key_count: key_count(10),
                 ..UsageDelta::default()
             },
             1,
@@ -347,7 +354,7 @@ mod tests {
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                key_count: 2,
+                key_count: key_count(2),
                 ..UsageDelta::default()
             },
             0,
@@ -378,7 +385,7 @@ mod tests {
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                key_count: 2,
+                key_count: key_count(2),
                 ..UsageDelta::default()
             },
             0,
@@ -406,7 +413,7 @@ mod tests {
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                key_count: 2,
+                key_count: key_count(2),
                 ..UsageDelta::default()
             },
             0,

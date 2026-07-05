@@ -1,9 +1,13 @@
 use bachelor::broadcast::spmc::broadcast;
 use bachelor::channel::mpsc::MpscChannelConsumer;
 use clap::Parser;
+use evdev::KeyCode;
 use futures::StreamExt;
 use futures::future::{Either, select};
-use openergo_server::device_events::{DeviceFilter, DeviceLabelStore, DeviceMatcher};
+use openergo_server::device_events::{DeviceFilter, DeviceLabel, DeviceLabelStore, DeviceMatcher};
+use openergo_server::usage::key_hand::{
+    KeyHand, KeyHandClassifier, KeyHandProfile, KeyHandUsageConfig,
+};
 use openergo_server::{config, device_events, dwell_click, server, usage};
 use rootcause::prelude::*;
 use shared::oe_spawn;
@@ -13,6 +17,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::rc::Rc;
+use std::str::FromStr;
 use tokio::net::UnixListener;
 use tracing::info;
 
@@ -135,23 +140,128 @@ fn usage_config_from_sources(
     label_store: &DeviceLabelStore,
 ) -> Result<usage::UsageConfig, Report> {
     let mut exclude = Vec::new();
-    if let Some(config::UsageConfig {
-        exclude: Some(labels),
-    }) = section
-    {
-        for label in labels {
-            let resolved = label_store.get(&label).ok_or_else(|| {
-                report!(
-                    "usage.exclude references unknown device label {label:?}; \
-                     it must be defined under [devices.include]"
-                )
-            })?;
-            if !exclude.contains(&resolved) {
-                exclude.push(resolved);
-            }
+    let (exclude_labels, key_hand_section) = match section {
+        Some(config::UsageConfig { exclude, key_hand }) => (exclude.unwrap_or_default(), key_hand),
+        None => (Vec::new(), None),
+    };
+
+    for label in exclude_labels {
+        let resolved = resolve_usage_device_label(label_store, &label, "usage.exclude", "entry")?;
+        if !exclude.contains(&resolved) {
+            exclude.push(resolved);
         }
     }
-    Ok(usage::UsageConfig { exclude })
+
+    let key_hand = key_hand_config_from_source(key_hand_section, label_store)?;
+    Ok(usage::UsageConfig { exclude, key_hand })
+}
+
+fn key_hand_config_from_source(
+    section: Option<config::KeyHandConfig>,
+    label_store: &DeviceLabelStore,
+) -> Result<KeyHandUsageConfig, Report> {
+    let Some(config::KeyHandConfig {
+        profile,
+        overrides,
+        devices,
+    }) = section
+    else {
+        return Ok(KeyHandUsageConfig::default());
+    };
+
+    let profile = key_hand_profile_from_config(
+        profile.as_deref(),
+        KeyHandProfile::AnsiQwerty,
+        "usage.key_hand.profile",
+    )?;
+    let mut default_classifier = KeyHandClassifier::from_profile(profile);
+    apply_key_hand_overrides(
+        &mut default_classifier,
+        overrides,
+        "usage.key_hand.overrides",
+    )?;
+
+    let mut device_classifiers = Vec::new();
+    if let Some(devices) = devices {
+        for (label, device_config) in devices {
+            let resolved =
+                resolve_usage_device_label(label_store, &label, "usage.key_hand.devices", "key")?;
+            let config::DeviceKeyHandConfig { profile, overrides } = device_config;
+            let mut classifier = match profile {
+                Some(profile) => KeyHandClassifier::from_profile(key_hand_profile_from_config(
+                    Some(&profile),
+                    KeyHandProfile::AnsiQwerty,
+                    &format!("usage.key_hand.devices.{label}.profile"),
+                )?),
+                None => default_classifier.clone(),
+            };
+            apply_key_hand_overrides(
+                &mut classifier,
+                overrides,
+                &format!("usage.key_hand.devices.{label}.overrides"),
+            )?;
+            device_classifiers.push((resolved, classifier));
+        }
+    }
+
+    Ok(KeyHandUsageConfig {
+        default_classifier,
+        device_classifiers,
+    })
+}
+
+fn resolve_usage_device_label(
+    label_store: &DeviceLabelStore,
+    label: &str,
+    section: &str,
+    noun: &str,
+) -> Result<DeviceLabel, Report> {
+    label_store.get(label).ok_or_else(|| {
+        report!(
+            "{section} {noun} {label:?} references unknown device label; \
+             it must be defined under [devices.include]"
+        )
+    })
+}
+
+fn key_hand_profile_from_config(
+    profile: Option<&str>,
+    default: KeyHandProfile,
+    path: &str,
+) -> Result<KeyHandProfile, Report> {
+    match profile {
+        Some("ansi_qwerty") => Ok(KeyHandProfile::AnsiQwerty),
+        Some("none") => Ok(KeyHandProfile::None),
+        Some(other) => {
+            bail!("{path} has unsupported value {other:?}; expected \"ansi_qwerty\" or \"none\"")
+        }
+        None => Ok(default),
+    }
+}
+
+fn apply_key_hand_overrides(
+    classifier: &mut KeyHandClassifier,
+    overrides: Option<HashMap<String, config::KeyHandOverrideValue>>,
+    path: &str,
+) -> Result<(), Report> {
+    if let Some(overrides) = overrides {
+        for (key_name, hand) in overrides {
+            let key = KeyCode::from_str(&key_name).map_err(|_| {
+                report!("{path} override key {key_name:?} is not a known evdev KeyCode")
+            })?;
+            classifier.set(key, key_hand_from_config_value(hand));
+        }
+    }
+
+    Ok(())
+}
+
+fn key_hand_from_config_value(value: config::KeyHandOverrideValue) -> KeyHand {
+    match value {
+        config::KeyHandOverrideValue::Left => KeyHand::Left,
+        config::KeyHandOverrideValue::Right => KeyHand::Right,
+        config::KeyHandOverrideValue::Other => KeyHand::Other,
+    }
 }
 
 const EVENT_BROADCAST_CAPACITY: NonZeroUsize =
@@ -442,5 +552,126 @@ mod tests {
         .expect("runtime config should build");
 
         assert_eq!(runtime.socket_path, PathBuf::from("/tmp/from-config.sock"));
+    }
+
+    #[test]
+    fn key_hand_config_defaults_and_overrides_compile() {
+        let mut labels = DeviceLabelStore::new();
+        let main_keyboard = labels.get_or_intern("main_keyboard");
+        let layer_pad = labels.get_or_intern("layer_pad");
+
+        let usage_config = usage_config_from_sources(
+            Some(config::UsageConfig {
+                exclude: None,
+                key_hand: Some(config::KeyHandConfig {
+                    profile: None,
+                    overrides: Some(HashMap::from([(
+                        "KEY_SPACE".to_string(),
+                        config::KeyHandOverrideValue::Left,
+                    )])),
+                    devices: Some(HashMap::from([
+                        (
+                            "main_keyboard".to_string(),
+                            config::DeviceKeyHandConfig {
+                                profile: None,
+                                overrides: Some(HashMap::from([(
+                                    "KEY_B".to_string(),
+                                    config::KeyHandOverrideValue::Right,
+                                )])),
+                            },
+                        ),
+                        (
+                            "layer_pad".to_string(),
+                            config::DeviceKeyHandConfig {
+                                profile: Some("none".to_string()),
+                                overrides: Some(HashMap::from([
+                                    ("KEY_F13".to_string(), config::KeyHandOverrideValue::Left),
+                                    ("KEY_F14".to_string(), config::KeyHandOverrideValue::Right),
+                                ])),
+                            },
+                        ),
+                    ])),
+                }),
+            }),
+            &labels,
+        )
+        .expect("usage config should compile");
+
+        assert_eq!(
+            usage_config
+                .key_hand
+                .default_classifier
+                .classify(KeyCode::KEY_B),
+            KeyHand::Left
+        );
+        assert_eq!(
+            usage_config
+                .key_hand
+                .default_classifier
+                .classify(KeyCode::KEY_SPACE),
+            KeyHand::Left
+        );
+
+        let main_classifier = usage_config.key_hand.classifier_for(main_keyboard);
+        assert_eq!(main_classifier.classify(KeyCode::KEY_SPACE), KeyHand::Left);
+        assert_eq!(main_classifier.classify(KeyCode::KEY_B), KeyHand::Right);
+
+        let layer_classifier = usage_config.key_hand.classifier_for(layer_pad);
+        assert_eq!(layer_classifier.classify(KeyCode::KEY_A), KeyHand::Other);
+        assert_eq!(layer_classifier.classify(KeyCode::KEY_F13), KeyHand::Left);
+        assert_eq!(layer_classifier.classify(KeyCode::KEY_F14), KeyHand::Right);
+    }
+
+    #[test]
+    fn key_hand_device_override_requires_known_label() {
+        let labels = DeviceLabelStore::new();
+        let err = usage_config_from_sources(
+            Some(config::UsageConfig {
+                exclude: None,
+                key_hand: Some(config::KeyHandConfig {
+                    profile: None,
+                    overrides: None,
+                    devices: Some(HashMap::from([(
+                        "missing".to_string(),
+                        config::DeviceKeyHandConfig {
+                            profile: Some("none".to_string()),
+                            overrides: None,
+                        },
+                    )])),
+                }),
+            }),
+            &labels,
+        )
+        .expect_err("unknown device override label should error");
+
+        assert!(
+            format!("{err}").contains("usage.key_hand.devices"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn key_hand_override_key_must_be_known_evdev_key_code() {
+        let labels = DeviceLabelStore::new();
+        let err = usage_config_from_sources(
+            Some(config::UsageConfig {
+                exclude: None,
+                key_hand: Some(config::KeyHandConfig {
+                    profile: None,
+                    overrides: Some(HashMap::from([(
+                        "KEY_NOT_REAL".to_string(),
+                        config::KeyHandOverrideValue::Left,
+                    )])),
+                    devices: None,
+                }),
+            }),
+            &labels,
+        )
+        .expect_err("invalid override key should error");
+
+        assert!(
+            format!("{err}").contains("not a known evdev KeyCode"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -3,11 +3,49 @@ use serde_with::{DurationNanoSeconds, serde_as};
 use std::ops::{Add, AddAssign, Mul, MulAssign};
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyCount {
+    pub left: u64,
+    pub right: u64,
+    pub other: u64,
+}
+
+impl KeyCount {
+    pub fn total(self) -> u64 {
+        self.left + self.right + self.other
+    }
+
+    pub fn saturating_delta(self, previous: Self) -> Self {
+        Self {
+            left: self.left.saturating_sub(previous.left),
+            right: self.right.saturating_sub(previous.right),
+            other: self.other.saturating_sub(previous.other),
+        }
+    }
+}
+
+impl AddAssign<KeyCount> for KeyCount {
+    fn add_assign(&mut self, delta: KeyCount) {
+        self.left += delta.left;
+        self.right += delta.right;
+        self.other += delta.other;
+    }
+}
+
+impl Add<KeyCount> for KeyCount {
+    type Output = Self;
+
+    fn add(mut self, delta: KeyCount) -> Self {
+        self += delta;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageDelta {
     pub click_count: u64,
     pub drag_duration: Duration,
-    pub key_count: u64,
+    pub key_count: KeyCount,
     pub scroll_count: u64,
     pub left_modifier_duration: ModifierUsageDelta,
     pub right_modifier_duration: ModifierUsageDelta,
@@ -68,7 +106,7 @@ pub struct UsageSnapshot {
     pub click_count: u64,
     #[serde_as(as = "DurationNanoSeconds<u64>")]
     pub drag_duration: Duration,
-    pub key_count: u64,
+    pub key_count: KeyCount,
     pub scroll_count: u64,
     pub left_modifier_duration: ModifierUsageSnapshot,
     pub right_modifier_duration: ModifierUsageSnapshot,
@@ -102,7 +140,7 @@ impl UsageSnapshot {
         UsageDelta {
             click_count: self.click_count.saturating_sub(previous.click_count),
             drag_duration: self.drag_duration.saturating_sub(previous.drag_duration),
-            key_count: self.key_count.saturating_sub(previous.key_count),
+            key_count: self.key_count.saturating_delta(previous.key_count),
             scroll_count: self.scroll_count.saturating_sub(previous.scroll_count),
             left_modifier_duration: self
                 .left_modifier_duration

@@ -3,6 +3,7 @@ use crate::device_events::DeviceLabelStore;
 use bachelor::broadcast::spmc::{SpmcBroadcastProducer, SpmcBroadcastSource, broadcast};
 use evdev::KeyCode;
 use futures::FutureExt;
+use key_hand::{KeyHand, KeyHandClassifier, KeyHandUsageConfig};
 use std::num::NonZeroUsize;
 use tokio::task::JoinHandle;
 
@@ -161,7 +162,7 @@ fn mouse_event(label: DeviceLabel, button: KeyCode, state: ButtonState) -> Event
 }
 
 fn controller_with_defaults() -> Controller {
-    Controller::new(DragConfig::default())
+    Controller::new(DragConfig::default(), KeyHandUsageConfig::default())
 }
 
 fn label() -> DeviceLabel {
@@ -180,7 +181,7 @@ async fn usage_event_publishes_after_fast_rate_limit_and_counts_active_window() 
 
     advance_and_yield(ONE_MS).await;
     let snapshot = expect_usage(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 1);
+    assert_eq!(snapshot.key_count.total(), 1);
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
 
     harness.close().await;
@@ -199,7 +200,7 @@ async fn usage_events_inside_one_batch_do_not_extend_publish_deadline() {
 
     advance_and_yield(ONE_MS).await;
     let snapshot = expect_usage(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 2);
+    assert_eq!(snapshot.key_count.total(), 2);
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
 
     harness.close().await;
@@ -216,7 +217,7 @@ async fn lone_non_usage_event_emits_activity_after_bridge_without_snapshot_mutat
 
     advance_and_yield(ONE_MS).await;
     let snapshot = expect_activity(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 0);
+    assert_eq!(snapshot.key_count.total(), 0);
     assert_eq!(snapshot.click_count, 0);
     assert_eq!(snapshot.scroll_count, 0);
     assert_eq!(snapshot.active_duration, Duration::ZERO);
@@ -237,7 +238,7 @@ async fn non_usage_followed_by_usage_within_bridge_is_absorbed() {
 
     advance_and_yield(NOTIFY_RATE_LIMIT_FAST - Duration::from_millis(50)).await;
     let snapshot = expect_usage(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 1);
+    assert_eq!(snapshot.key_count.total(), 1);
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
 
     harness.close().await;
@@ -296,7 +297,7 @@ async fn non_usage_events_inside_batch_do_not_extend_or_mutate_publish() {
 
     advance_and_yield(ONE_MS).await;
     let snapshot = expect_usage(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 1);
+    assert_eq!(snapshot.key_count.total(), 1);
     assert_eq!(snapshot.click_count, 0);
     assert_eq!(snapshot.scroll_count, 0);
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
@@ -318,7 +319,7 @@ async fn driver_captures_event_time_after_await_returns() {
 
     advance_and_yield(ONE_MS).await;
     let snapshot = expect_usage(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 1);
+    assert_eq!(snapshot.key_count.total(), 1);
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
 
     harness.close().await;
@@ -331,7 +332,7 @@ async fn usage_after_bridge_window_starts_fresh_batch() {
     harness.send_key_down(KeyCode::KEY_A).await;
     advance_and_yield(NOTIFY_RATE_LIMIT_FAST).await;
     let snapshot = expect_usage(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 1);
+    assert_eq!(snapshot.key_count.total(), 1);
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
 
     harness.send_key_down(KeyCode::KEY_B).await;
@@ -340,7 +341,7 @@ async fn usage_after_bridge_window_starts_fresh_batch() {
 
     advance_and_yield(ONE_MS).await;
     let snapshot = expect_usage(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 2);
+    assert_eq!(snapshot.key_count.total(), 2);
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 2);
 
     harness.close().await;
@@ -355,7 +356,7 @@ async fn follow_up_usage_within_bridge_resumes_from_last_publish() {
     harness.send_key_down(KeyCode::KEY_B).await;
     advance_and_yield(Duration::from_millis(50)).await;
     let snapshot = expect_usage(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 2);
+    assert_eq!(snapshot.key_count.total(), 2);
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
 
     advance_and_yield(Duration::from_millis(50)).await;
@@ -365,7 +366,7 @@ async fn follow_up_usage_within_bridge_resumes_from_last_publish() {
 
     advance_and_yield(ONE_MS).await;
     let snapshot = expect_usage(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 3);
+    assert_eq!(snapshot.key_count.total(), 3);
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 2);
 
     harness.close().await;
@@ -625,6 +626,7 @@ async fn excluded_label_short_circuits_usage_classification() {
     let mut harness = DriverHarness::new_with_label(
         UsageConfig {
             exclude: vec![excluded_label],
+            ..UsageConfig::default()
         },
         label,
     )
@@ -641,7 +643,7 @@ async fn excluded_label_short_circuits_usage_classification() {
 
     advance_and_yield(BRIDGE_INTERVAL).await;
     let snapshot = expect_activity(&mut harness.consumer).await;
-    assert_eq!(snapshot.key_count, 0);
+    assert_eq!(snapshot.key_count.total(), 0);
     assert_eq!(snapshot.active_duration, Duration::ZERO);
 
     harness.close().await;
@@ -661,7 +663,7 @@ fn non_modifier_key_down_increments_key_count_and_key_up_is_ignored() {
     let now = Instant::now();
 
     assert!(controller.handle_event(&key_event(label, KeyCode::KEY_A, ButtonState::Down), now));
-    assert_eq!(controller.snapshot_at(now).key_count, 1);
+    assert_eq!(controller.snapshot_at(now).key_count.total(), 1);
 
     assert!(!controller.handle_event(
         &key_event(label, KeyCode::KEY_A, ButtonState::Up),
@@ -670,9 +672,41 @@ fn non_modifier_key_down_increments_key_count_and_key_up_is_ignored() {
     assert_eq!(
         controller
             .snapshot_at(now + Duration::from_millis(10))
-            .key_count,
+            .key_count
+            .total(),
         1
     );
+}
+
+#[test]
+fn non_modifier_key_down_uses_device_specific_classifier() {
+    let mut labels = DeviceLabelStore::new();
+    let default_label = labels.get_or_intern("keyboard");
+    let custom_label = labels.get_or_intern("thumb_board");
+    let mut custom_classifier = KeyHandClassifier::none();
+    custom_classifier.set(KeyCode::KEY_SPACE, KeyHand::Right);
+    let mut controller = Controller::new(
+        DragConfig::default(),
+        KeyHandUsageConfig {
+            default_classifier: KeyHandClassifier::ansi_qwerty(),
+            device_classifiers: vec![(custom_label, custom_classifier)],
+        },
+    );
+    let now = Instant::now();
+
+    assert!(controller.handle_event(
+        &key_event(default_label, KeyCode::KEY_SPACE, ButtonState::Down),
+        now
+    ));
+    assert!(controller.handle_event(
+        &key_event(custom_label, KeyCode::KEY_SPACE, ButtonState::Down),
+        now
+    ));
+
+    let snapshot = controller.snapshot_at(now);
+    assert_eq!(snapshot.key_count.left, 0);
+    assert_eq!(snapshot.key_count.right, 1);
+    assert_eq!(snapshot.key_count.other, 1);
 }
 
 #[test]
@@ -694,6 +728,7 @@ fn modifier_down_tracks_until_matching_up_on_correct_side() {
     let snapshot = controller.snapshot_at(start + duration);
     assert_eq!(snapshot.left_modifier_duration.shift, duration);
     assert_eq!(snapshot.right_modifier_duration.shift, Duration::ZERO);
+    assert_eq!(snapshot.key_count.total(), 0);
 }
 
 #[test]

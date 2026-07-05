@@ -62,7 +62,7 @@ impl OpenUsageCreditBucket {
         self.last_increment_end = increment.end;
         self.observed_duration += increment.end.duration_since(increment.start).unsigned_abs();
 
-        self.max_increment_key_count = self.max_increment_key_count.max(delta.key_count);
+        self.max_increment_key_count = self.max_increment_key_count.max(delta.key_count.total());
         self.max_increment_click_count = self.max_increment_click_count.max(delta.click_count);
         self.max_increment_scroll_count = self.max_increment_scroll_count.max(delta.scroll_count);
 
@@ -89,7 +89,7 @@ impl OpenUsageCreditBucket {
             increment_count: self.increment_count,
             u_click_count: self.usage.click_count,
             u_drag: self.usage.drag_duration,
-            u_key_count: self.usage.key_count,
+            u_key_count: self.usage.key_count.total(),
             u_scroll_count: self.usage.scroll_count,
             u_left_shift: self.usage.left_modifier_duration.shift,
             u_left_ctrl: self.usage.left_modifier_duration.ctrl,
@@ -187,7 +187,7 @@ impl UsageCreditBucketBuilder {
 /// Whether a usage delta represents any tracked input.
 fn usage_is_active(delta: &UsageDelta) -> bool {
     delta.click_count != 0
-        || delta.key_count != 0
+        || delta.key_count.total() != 0
         || delta.scroll_count != 0
         || !delta.drag_duration.is_zero()
         || !delta.active_duration.is_zero()
@@ -196,6 +196,7 @@ fn usage_is_active(delta: &UsageDelta) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::model::KeyCount;
 
     fn ts(millis: i64) -> Timestamp {
         Timestamp::UNIX_EPOCH + SignedDuration::from_millis(millis)
@@ -204,7 +205,10 @@ mod tests {
     /// Increment spanning `[start_ms, end_ms)` with the given key count.
     fn keys(start_ms: i64, end_ms: i64, key_count: u64) -> UsageIncrement {
         let delta = UsageDelta {
-            key_count,
+            key_count: KeyCount {
+                left: key_count,
+                ..KeyCount::default()
+            },
             active_duration: Duration::from_millis((end_ms - start_ms) as u64),
             ..UsageDelta::default()
         };

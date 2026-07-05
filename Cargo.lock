@@ -2785,6 +2785,7 @@ dependencies = [
  "rootcause",
  "serde",
  "shared",
+ "smallvec",
  "tokio",
  "tokio-util",
  "toml",

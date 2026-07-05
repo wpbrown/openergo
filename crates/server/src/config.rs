@@ -63,6 +63,30 @@ pub struct UsageConfig {
     /// Friendly device labels to ignore when computing usage. Each label must
     /// already be defined under `[devices.include]`.
     pub exclude: Option<Vec<String>>,
+    pub key_hand: Option<KeyHandConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyHandConfig {
+    pub profile: Option<String>,
+    pub overrides: Option<HashMap<String, KeyHandOverrideValue>>,
+    pub devices: Option<HashMap<String, DeviceKeyHandConfig>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceKeyHandConfig {
+    pub profile: Option<String>,
+    pub overrides: Option<HashMap<String, KeyHandOverrideValue>>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyHandOverrideValue {
+    Left,
+    Right,
+    Other,
 }
 
 /// Matches a device by path and/or udev properties. All specified fields must
@@ -150,15 +174,28 @@ impl Config {
             }
         }
 
-        if let Some(usage) = &self.usage
-            && let Some(exclude) = &usage.exclude
-        {
-            for label in exclude {
-                if !is_valid_label(label) {
-                    bail!(
-                        "usage.exclude entry {label:?} is not a valid label \
-                         (must be non-empty ASCII alphanumerics, '_' or '-')"
-                    );
+        if let Some(usage) = &self.usage {
+            if let Some(exclude) = &usage.exclude {
+                for label in exclude {
+                    if !is_valid_label(label) {
+                        bail!(
+                            "usage.exclude entry {label:?} is not a valid label \
+                             (must be non-empty ASCII alphanumerics, '_' or '-')"
+                        );
+                    }
+                }
+            }
+
+            if let Some(key_hand) = &usage.key_hand
+                && let Some(devices) = &key_hand.devices
+            {
+                for label in devices.keys() {
+                    if !is_valid_label(label) {
+                        bail!(
+                            "usage.key_hand.devices key {label:?} is not a valid label \
+                             (must be non-empty ASCII alphanumerics, '_' or '-')"
+                        );
+                    }
                 }
             }
         }
@@ -306,5 +343,64 @@ mod tests {
             "#,
         );
         assert!(result.is_err(), "toml must reject duplicate keys");
+    }
+
+    #[test]
+    fn usage_key_hand_config_parses() {
+        let config: Config = toml::from_str(
+            r#"
+            [usage.key_hand]
+            profile = "ansi_qwerty"
+
+            [usage.key_hand.overrides]
+            KEY_SPACE = "left"
+
+            [usage.key_hand.devices.main_keyboard]
+
+            [usage.key_hand.devices.main_keyboard.overrides]
+            KEY_B = "right"
+            "#,
+        )
+        .expect("config should parse");
+
+        let key_hand = config
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.key_hand.as_ref())
+            .expect("key hand config should be present");
+        assert_eq!(key_hand.profile.as_deref(), Some("ansi_qwerty"));
+        assert_eq!(
+            key_hand
+                .overrides
+                .as_ref()
+                .and_then(|overrides| overrides.get("KEY_SPACE")),
+            Some(&KeyHandOverrideValue::Left)
+        );
+        assert!(
+            key_hand
+                .devices
+                .as_ref()
+                .is_some_and(|devices| devices.contains_key("main_keyboard"))
+        );
+        config.validate().expect("config should validate");
+    }
+
+    #[test]
+    fn usage_key_hand_device_label_syntax_is_validated() {
+        let config: Config = toml::from_str(
+            r#"
+            [usage.key_hand.devices."bad label"]
+            profile = "none"
+            "#,
+        )
+        .expect("config should parse");
+
+        let err = config
+            .validate()
+            .expect_err("invalid key-hand device label should error");
+        assert!(
+            format!("{err}").contains("usage.key_hand.devices"),
+            "unexpected error: {err}"
+        );
     }
 }
