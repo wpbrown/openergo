@@ -330,6 +330,8 @@ struct Controller {
     right_alt: Option<ModifierTracker>,
     left_meta: Option<ModifierTracker>,
     right_meta: Option<ModifierTracker>,
+    left_multi: Option<ModifierTracker>,
+    right_multi: Option<ModifierTracker>,
 }
 
 impl Controller {
@@ -347,6 +349,8 @@ impl Controller {
             right_alt: None,
             left_meta: None,
             right_meta: None,
+            left_multi: None,
+            right_multi: None,
         }
     }
 
@@ -361,14 +365,7 @@ impl Controller {
     }
 
     fn has_active_modifiers(&self) -> bool {
-        self.left_shift.is_some()
-            || self.right_shift.is_some()
-            || self.left_ctrl.is_some()
-            || self.right_ctrl.is_some()
-            || self.left_alt.is_some()
-            || self.right_alt.is_some()
-            || self.left_meta.is_some()
-            || self.right_meta.is_some()
+        self.has_active_modifier_on(Side::Left) || self.has_active_modifier_on(Side::Right)
     }
 
     fn has_active_drag(&self) -> bool {
@@ -390,6 +387,33 @@ impl Controller {
             EventKind::MouseScrollNotch(value) => self.handle_mouse_scroll(value),
             EventKind::MouseScrollHiRes(_) => false,
         }
+    }
+
+    fn active_modifier_count(&self, side: Side) -> usize {
+        match side {
+            Side::Left => [
+                &self.left_shift,
+                &self.left_ctrl,
+                &self.left_alt,
+                &self.left_meta,
+            ]
+            .iter()
+            .filter(|tracker| tracker.is_some())
+            .count(),
+            Side::Right => [
+                &self.right_shift,
+                &self.right_ctrl,
+                &self.right_alt,
+                &self.right_meta,
+            ]
+            .iter()
+            .filter(|tracker| tracker.is_some())
+            .count(),
+        }
+    }
+
+    fn has_active_modifier_on(&self, side: Side) -> bool {
+        self.active_modifier_count(side) > 0
     }
 
     fn handle_mouse_move(&mut self, delta: i32, now: Instant) -> bool {
@@ -480,39 +504,79 @@ impl Controller {
         if let Some((side, modifier)) = classify_modifier(key) {
             match key_state {
                 ButtonState::Down => {
+                    if self.modifier_tracker(side, modifier).is_some() {
+                        return false;
+                    }
+
+                    let previous_count = self.active_modifier_count(side);
                     let tracker = self.modifier_tracker_mut(side, modifier);
-                    if tracker.is_none() {
-                        *tracker = Some(ModifierTracker {
+                    *tracker = Some(ModifierTracker {
+                        last_accounted: now,
+                    });
+                    if previous_count == 1 {
+                        *self.multi_tracker_mut(side) = Some(ModifierTracker {
                             last_accounted: now,
                         });
-                        true
-                    } else {
-                        false
                     }
+
+                    true
                 }
                 ButtonState::Up => {
-                    if let Some(mt) = self.modifier_tracker_mut(side, modifier).take() {
-                        let duration = now.saturating_duration_since(mt.last_accounted);
-                        match side {
-                            Side::Left => self.add_left_modifier_duration(modifier, duration),
-                            Side::Right => self.add_right_modifier_duration(modifier, duration),
-                        }
-                        true
-                    } else {
-                        false
+                    let previous_count = self.active_modifier_count(side);
+                    let Some(mt) = self.modifier_tracker_mut(side, modifier).take() else {
+                        return false;
+                    };
+                    if previous_count == 2 {
+                        self.finish_multi_modifier_duration(side, now);
                     }
+
+                    let duration = now.saturating_duration_since(mt.last_accounted);
+                    match side {
+                        Side::Left => self.add_left_modifier_duration(modifier, duration),
+                        Side::Right => self.add_right_modifier_duration(modifier, duration),
+                    }
+                    true
                 }
             }
         } else if key_state == ButtonState::Down {
-            let key_count = match self.key_hand.classifier_for(label).classify(key) {
-                KeyHand::Left => &mut self.snapshot.key_count.left,
-                KeyHand::Right => &mut self.snapshot.key_count.right,
-                KeyHand::Other => &mut self.snapshot.key_count.other,
-            };
-            *key_count = key_count.saturating_add(1);
+            self.add_non_modifier_key(label, key);
             true
         } else {
             false
+        }
+    }
+
+    fn add_non_modifier_key(&mut self, label: DeviceLabel, key: KeyCode) {
+        match self.key_hand.classifier_for(label).classify(key) {
+            KeyHand::Left if self.has_active_modifier_on(Side::Left) => {
+                self.snapshot.left_modifier_duration.combo =
+                    self.snapshot.left_modifier_duration.combo.saturating_add(1);
+            }
+            KeyHand::Left if self.has_active_modifier_on(Side::Right) => {
+                self.snapshot.cross_combo = self.snapshot.cross_combo.saturating_add(1);
+            }
+            KeyHand::Left => {
+                self.snapshot.key_count.left = self.snapshot.key_count.left.saturating_add(1);
+            }
+            KeyHand::Right if self.has_active_modifier_on(Side::Right) => {
+                self.snapshot.right_modifier_duration.combo = self
+                    .snapshot
+                    .right_modifier_duration
+                    .combo
+                    .saturating_add(1);
+            }
+            KeyHand::Right if self.has_active_modifier_on(Side::Left) => {
+                self.snapshot.cross_combo = self.snapshot.cross_combo.saturating_add(1);
+            }
+            KeyHand::Right => {
+                self.snapshot.key_count.right = self.snapshot.key_count.right.saturating_add(1);
+            }
+            KeyHand::Other if self.has_active_modifiers() => {
+                self.snapshot.other_combo = self.snapshot.other_combo.saturating_add(1);
+            }
+            KeyHand::Other => {
+                self.snapshot.key_count.other = self.snapshot.key_count.other.saturating_add(1);
+            }
         }
     }
 
@@ -535,6 +599,32 @@ impl Controller {
         flush_modifier!(right_alt, add_right_modifier_duration, Modifier::Alt);
         flush_modifier!(left_meta, add_left_modifier_duration, Modifier::Meta);
         flush_modifier!(right_meta, add_right_modifier_duration, Modifier::Meta);
+        self.flush_multi_modifier_duration(Side::Left, publish_at);
+        self.flush_multi_modifier_duration(Side::Right, publish_at);
+    }
+
+    fn flush_multi_modifier_duration(&mut self, side: Side, publish_at: Instant) {
+        if let Some(tracker) = self.multi_tracker_mut(side) {
+            let duration = publish_at.saturating_duration_since(tracker.last_accounted);
+            tracker.last_accounted = publish_at;
+            self.add_multi_modifier_duration(side, duration);
+        }
+    }
+
+    fn finish_multi_modifier_duration(&mut self, side: Side, now: Instant) {
+        if let Some(tracker) = self.multi_tracker_mut(side).take() {
+            self.add_multi_modifier_duration(
+                side,
+                now.saturating_duration_since(tracker.last_accounted),
+            );
+        }
+    }
+
+    fn add_multi_modifier_duration(&mut self, side: Side, duration: Duration) {
+        match side {
+            Side::Left => self.snapshot.left_modifier_duration.multi += duration,
+            Side::Right => self.snapshot.right_modifier_duration.multi += duration,
+        }
     }
 
     fn add_left_modifier_duration(&mut self, modifier: Modifier, duration: Duration) {
@@ -580,6 +670,26 @@ impl Controller {
             (Side::Right, Modifier::Alt) => &mut self.right_alt,
             (Side::Left, Modifier::Meta) => &mut self.left_meta,
             (Side::Right, Modifier::Meta) => &mut self.right_meta,
+        }
+    }
+
+    fn modifier_tracker(&self, side: Side, modifier: Modifier) -> &Option<ModifierTracker> {
+        match (side, modifier) {
+            (Side::Left, Modifier::Shift) => &self.left_shift,
+            (Side::Right, Modifier::Shift) => &self.right_shift,
+            (Side::Left, Modifier::Ctrl) => &self.left_ctrl,
+            (Side::Right, Modifier::Ctrl) => &self.right_ctrl,
+            (Side::Left, Modifier::Alt) => &self.left_alt,
+            (Side::Right, Modifier::Alt) => &self.right_alt,
+            (Side::Left, Modifier::Meta) => &self.left_meta,
+            (Side::Right, Modifier::Meta) => &self.right_meta,
+        }
+    }
+
+    fn multi_tracker_mut(&mut self, side: Side) -> &mut Option<ModifierTracker> {
+        match side {
+            Side::Left => &mut self.left_multi,
+            Side::Right => &mut self.right_multi,
         }
     }
 }

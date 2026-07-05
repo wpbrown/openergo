@@ -6,7 +6,7 @@ use std::time::Duration;
 
 /// Wire-format protocol version. Bump on any incompatible change to
 /// `Command`, `ServerMessage`, or framing.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageIncrement {
@@ -71,15 +71,31 @@ mod diag {
             write_count(f, "keys.l", self.delta.key_count.left)?;
             write_count(f, "keys.r", self.delta.key_count.right)?;
             write_count(f, "keys.o", self.delta.key_count.other)?;
+            write_count(f, "combo.o", self.delta.other_combo)?;
+            write_count(f, "combo.cross", self.delta.cross_combo)?;
             write_count(f, "scroll", self.delta.scroll_count)?;
             write_modifier_duration(
                 f,
-                ["lmod.shift", "lmod.ctrl", "lmod.alt", "lmod.meta"],
+                [
+                    "lmod.shift",
+                    "lmod.ctrl",
+                    "lmod.alt",
+                    "lmod.meta",
+                    "lmod.multi",
+                    "lmod.combo",
+                ],
                 self.delta.left_modifier_duration,
             )?;
             write_modifier_duration(
                 f,
-                ["rmod.shift", "rmod.ctrl", "rmod.alt", "rmod.meta"],
+                [
+                    "rmod.shift",
+                    "rmod.ctrl",
+                    "rmod.alt",
+                    "rmod.meta",
+                    "rmod.multi",
+                    "rmod.combo",
+                ],
                 self.delta.right_modifier_duration,
             )?;
             write_duration(f, "active", self.delta.active_duration)?;
@@ -105,13 +121,15 @@ mod diag {
 
     fn write_modifier_duration(
         f: &mut fmt::Formatter<'_>,
-        labels: [&str; 4],
+        labels: [&str; 6],
         duration: ModifierUsageDelta,
     ) -> fmt::Result {
         write_duration(f, labels[0], duration.shift)?;
         write_duration(f, labels[1], duration.ctrl)?;
         write_duration(f, labels[2], duration.alt)?;
-        write_duration(f, labels[3], duration.meta)
+        write_duration(f, labels[3], duration.meta)?;
+        write_duration(f, labels[4], duration.multi)?;
+        write_count(f, labels[5], duration.combo)
     }
 
     fn write_compact_duration(f: &mut fmt::Formatter<'_>, duration: Duration) -> fmt::Result {
@@ -147,9 +165,13 @@ mod tests {
                     right: 0,
                     other: 4,
                 },
+                other_combo: 6,
+                cross_combo: 7,
                 scroll_count: 0,
                 left_modifier_duration: ModifierUsageDelta {
                     shift: Duration::from_millis(5),
+                    multi: Duration::from_millis(8),
+                    combo: 9,
                     ..ModifierUsageDelta::default()
                 },
                 right_modifier_duration: ModifierUsageDelta {
@@ -164,7 +186,7 @@ mod tests {
 
         assert_eq!(
             increment.to_string(),
-            "01:01:01-01:01:02 clicks=2 drag=3ms keys.l=1 keys.o=4 lmod.shift=5ms rmod.ctrl=250us active=2s"
+            "01:01:01-01:01:02 clicks=2 drag=3ms keys.l=1 keys.o=4 combo.o=6 combo.cross=7 lmod.shift=5ms lmod.multi=8ms lmod.combo=9 rmod.ctrl=250us active=2s"
         );
     }
 

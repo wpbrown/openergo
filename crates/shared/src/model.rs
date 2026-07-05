@@ -46,6 +46,8 @@ pub struct UsageDelta {
     pub click_count: u64,
     pub drag_duration: Duration,
     pub key_count: KeyCount,
+    pub other_combo: u64,
+    pub cross_combo: u64,
     pub scroll_count: u64,
     pub left_modifier_duration: ModifierUsageDelta,
     pub right_modifier_duration: ModifierUsageDelta,
@@ -59,6 +61,8 @@ pub struct ModifierUsageDelta {
     pub ctrl: Duration,
     pub alt: Duration,
     pub meta: Duration,
+    pub multi: Duration,
+    pub combo: u64,
 }
 
 impl AddAssign<&UsageDelta> for UsageDelta {
@@ -66,6 +70,8 @@ impl AddAssign<&UsageDelta> for UsageDelta {
         self.click_count += delta.click_count;
         self.drag_duration += delta.drag_duration;
         self.key_count += delta.key_count;
+        self.other_combo += delta.other_combo;
+        self.cross_combo += delta.cross_combo;
         self.scroll_count += delta.scroll_count;
         self.left_modifier_duration += &delta.left_modifier_duration;
         self.right_modifier_duration += &delta.right_modifier_duration;
@@ -88,6 +94,8 @@ impl AddAssign<&ModifierUsageDelta> for ModifierUsageDelta {
         self.ctrl += delta.ctrl;
         self.alt += delta.alt;
         self.meta += delta.meta;
+        self.multi += delta.multi;
+        self.combo += delta.combo;
     }
 }
 
@@ -107,6 +115,10 @@ pub struct UsageSnapshot {
     #[serde_as(as = "DurationNanoSeconds<u64>")]
     pub drag_duration: Duration,
     pub key_count: KeyCount,
+    /// Other-hand key presses performed while any modifier was active.
+    pub other_combo: u64,
+    /// Opposite-hand key presses while only the opposite hand had a modifier.
+    pub cross_combo: u64,
     pub scroll_count: u64,
     pub left_modifier_duration: ModifierUsageSnapshot,
     pub right_modifier_duration: ModifierUsageSnapshot,
@@ -119,6 +131,8 @@ impl AddAssign<&UsageDelta> for UsageSnapshot {
         self.click_count += delta.click_count;
         self.drag_duration += delta.drag_duration;
         self.key_count += delta.key_count;
+        self.other_combo += delta.other_combo;
+        self.cross_combo += delta.cross_combo;
         self.scroll_count += delta.scroll_count;
         self.left_modifier_duration += &delta.left_modifier_duration;
         self.right_modifier_duration += &delta.right_modifier_duration;
@@ -141,6 +155,8 @@ impl UsageSnapshot {
             click_count: self.click_count.saturating_sub(previous.click_count),
             drag_duration: self.drag_duration.saturating_sub(previous.drag_duration),
             key_count: self.key_count.saturating_delta(previous.key_count),
+            other_combo: self.other_combo.saturating_sub(previous.other_combo),
+            cross_combo: self.cross_combo.saturating_sub(previous.cross_combo),
             scroll_count: self.scroll_count.saturating_sub(previous.scroll_count),
             left_modifier_duration: self
                 .left_modifier_duration
@@ -166,6 +182,11 @@ pub struct ModifierUsageSnapshot {
     pub alt: Duration,
     #[serde_as(as = "DurationNanoSeconds<u64>")]
     pub meta: Duration,
+    /// Union time while more than one modifier was held on this hand.
+    #[serde_as(as = "DurationNanoSeconds<u64>")]
+    pub multi: Duration,
+    /// Same-hand non-modifier key presses while this hand held a modifier.
+    pub combo: u64,
 }
 
 impl AddAssign<&ModifierUsageDelta> for ModifierUsageSnapshot {
@@ -174,6 +195,8 @@ impl AddAssign<&ModifierUsageDelta> for ModifierUsageSnapshot {
         self.ctrl += delta.ctrl;
         self.alt += delta.alt;
         self.meta += delta.meta;
+        self.multi += delta.multi;
+        self.combo += delta.combo;
     }
 }
 
@@ -193,6 +216,8 @@ impl ModifierUsageSnapshot {
             ctrl: self.ctrl.saturating_sub(previous.ctrl),
             alt: self.alt.saturating_sub(previous.alt),
             meta: self.meta.saturating_sub(previous.meta),
+            multi: self.multi.saturating_sub(previous.multi),
+            combo: self.combo.saturating_sub(previous.combo),
         }
     }
 }
@@ -281,6 +306,41 @@ pub fn ratio(credit: Credit, limit: CreditLimit) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_snapshot_accumulates_and_diffs_new_combo_fields() {
+        let previous = UsageSnapshot {
+            other_combo: 3,
+            cross_combo: 5,
+            left_modifier_duration: ModifierUsageSnapshot {
+                multi: Duration::from_millis(20),
+                combo: 7,
+                ..ModifierUsageSnapshot::default()
+            },
+            ..UsageSnapshot::default()
+        };
+        let mut snapshot = previous.clone();
+
+        snapshot += &UsageDelta {
+            other_combo: 2,
+            cross_combo: 4,
+            left_modifier_duration: ModifierUsageDelta {
+                multi: Duration::from_millis(30),
+                combo: 11,
+                ..ModifierUsageDelta::default()
+            },
+            ..UsageDelta::default()
+        };
+
+        let delta = snapshot.saturating_delta(&previous);
+        assert_eq!(delta.other_combo, 2);
+        assert_eq!(delta.cross_combo, 4);
+        assert_eq!(
+            delta.left_modifier_duration.multi,
+            Duration::from_millis(30)
+        );
+        assert_eq!(delta.left_modifier_duration.combo, 11);
+    }
 
     #[test]
     fn ratio_divides_credit_by_limit_without_rounding() {

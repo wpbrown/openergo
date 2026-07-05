@@ -582,6 +582,10 @@ async fn overlapping_modifiers_flush_and_release_independently() {
         NOTIFY_RATE_LIMIT_FAST
     );
     assert_eq!(snapshot.left_modifier_duration.ctrl, NOTIFY_RATE_LIMIT_FAST);
+    assert_eq!(
+        snapshot.left_modifier_duration.multi,
+        NOTIFY_RATE_LIMIT_FAST
+    );
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST);
 
     advance_and_yield(Duration::from_millis(50)).await;
@@ -597,6 +601,10 @@ async fn overlapping_modifiers_flush_and_release_independently() {
         snapshot.left_modifier_duration.ctrl,
         NOTIFY_RATE_LIMIT_FAST * 2
     );
+    assert_eq!(
+        snapshot.left_modifier_duration.multi,
+        NOTIFY_RATE_LIMIT_FAST + Duration::from_millis(50)
+    );
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 2);
 
     advance_and_yield(Duration::from_millis(100)).await;
@@ -611,6 +619,10 @@ async fn overlapping_modifiers_flush_and_release_independently() {
     assert_eq!(
         snapshot.left_modifier_duration.ctrl,
         NOTIFY_RATE_LIMIT_FAST * 2 + Duration::from_millis(100)
+    );
+    assert_eq!(
+        snapshot.left_modifier_duration.multi,
+        NOTIFY_RATE_LIMIT_FAST + Duration::from_millis(50)
     );
     assert_eq!(snapshot.active_duration, NOTIFY_RATE_LIMIT_FAST * 3);
 
@@ -710,6 +722,106 @@ fn non_modifier_key_down_uses_device_specific_classifier() {
 }
 
 #[test]
+fn same_hand_modifier_combo_suppresses_key_count() {
+    let mut controller = controller_with_defaults();
+    let label = label();
+    let now = Instant::now();
+
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Down),
+        now
+    ));
+    assert!(controller.handle_event(&key_event(label, KeyCode::KEY_A, ButtonState::Down), now));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_RIGHTSHIFT, ButtonState::Down),
+        now
+    ));
+    assert!(controller.handle_event(&key_event(label, KeyCode::KEY_Y, ButtonState::Down), now));
+
+    let snapshot = controller.snapshot_at(now);
+    assert_eq!(snapshot.left_modifier_duration.combo, 1);
+    assert_eq!(snapshot.right_modifier_duration.combo, 1);
+    assert_eq!(snapshot.cross_combo, 0);
+    assert_eq!(snapshot.key_count.left, 0);
+    assert_eq!(snapshot.key_count.right, 0);
+}
+
+#[test]
+fn cross_combo_counts_in_both_directions_only_without_same_hand_modifier() {
+    let mut controller = controller_with_defaults();
+    let label = label();
+    let now = Instant::now();
+
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Down),
+        now
+    ));
+    assert!(controller.handle_event(&key_event(label, KeyCode::KEY_Y, ButtonState::Down), now));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_RIGHTSHIFT, ButtonState::Down),
+        now
+    ));
+    assert!(controller.handle_event(&key_event(label, KeyCode::KEY_U, ButtonState::Down), now));
+
+    let snapshot = controller.snapshot_at(now);
+    assert_eq!(snapshot.cross_combo, 1);
+    assert_eq!(snapshot.right_modifier_duration.combo, 1);
+    assert_eq!(snapshot.key_count.right, 0);
+
+    let mut controller = controller_with_defaults();
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_RIGHTSHIFT, ButtonState::Down),
+        now
+    ));
+    assert!(controller.handle_event(&key_event(label, KeyCode::KEY_A, ButtonState::Down), now));
+
+    let snapshot = controller.snapshot_at(now);
+    assert_eq!(snapshot.cross_combo, 1);
+    assert_eq!(snapshot.left_modifier_duration.combo, 0);
+    assert_eq!(snapshot.key_count.left, 0);
+}
+
+#[test]
+fn other_key_with_any_modifier_counts_other_combo_once() {
+    let mut controller = controller_with_defaults();
+    let label = label();
+    let now = Instant::now();
+
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Down),
+        now
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_SPACE, ButtonState::Down),
+        now
+    ));
+
+    let snapshot = controller.snapshot_at(now);
+    assert_eq!(snapshot.other_combo, 1);
+    assert_eq!(snapshot.key_count.other, 0);
+    assert_eq!(snapshot.cross_combo, 0);
+
+    let mut controller = controller_with_defaults();
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Down),
+        now
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_RIGHTSHIFT, ButtonState::Down),
+        now
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_SPACE, ButtonState::Down),
+        now
+    ));
+
+    let snapshot = controller.snapshot_at(now);
+    assert_eq!(snapshot.other_combo, 1);
+    assert_eq!(snapshot.key_count.other, 0);
+    assert_eq!(snapshot.cross_combo, 0);
+}
+
+#[test]
 fn modifier_down_tracks_until_matching_up_on_correct_side() {
     let mut controller = controller_with_defaults();
     let label = label();
@@ -760,6 +872,111 @@ fn duplicate_modifier_down_does_not_reset_start_and_orphan_up_is_ignored() {
             .left_modifier_duration
             .ctrl,
         Duration::from_millis(100)
+    );
+}
+
+#[test]
+fn multi_modifier_duration_is_union_time_while_more_than_one_same_side_modifier_is_active() {
+    let mut controller = controller_with_defaults();
+    let label = label();
+    let start = Instant::now();
+
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Down),
+        start
+    ));
+    assert!(!controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Down),
+        start + Duration::from_millis(10)
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTCTRL, ButtonState::Down),
+        start + Duration::from_millis(20)
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTALT, ButtonState::Down),
+        start + Duration::from_millis(50)
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Up),
+        start + Duration::from_millis(80)
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTCTRL, ButtonState::Up),
+        start + Duration::from_millis(110)
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTALT, ButtonState::Up),
+        start + Duration::from_millis(140)
+    ));
+    assert!(!controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Up),
+        start + Duration::from_millis(150)
+    ));
+
+    let snapshot = controller.snapshot_at(start + Duration::from_millis(150));
+    assert_eq!(
+        snapshot.left_modifier_duration.multi,
+        Duration::from_millis(90)
+    );
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        Duration::from_millis(80)
+    );
+    assert_eq!(
+        snapshot.left_modifier_duration.ctrl,
+        Duration::from_millis(90)
+    );
+    assert_eq!(
+        snapshot.left_modifier_duration.alt,
+        Duration::from_millis(90)
+    );
+    assert_eq!(snapshot.right_modifier_duration.multi, Duration::ZERO);
+}
+
+#[test]
+fn multi_modifier_duration_restarts_when_same_side_modifier_overlap_resumes() {
+    let mut controller = controller_with_defaults();
+    let label = label();
+    let start = Instant::now();
+
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Down),
+        start
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTCTRL, ButtonState::Down),
+        start + Duration::from_millis(10)
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTCTRL, ButtonState::Up),
+        start + Duration::from_millis(40)
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTCTRL, ButtonState::Down),
+        start + Duration::from_millis(70)
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTSHIFT, ButtonState::Up),
+        start + Duration::from_millis(100)
+    ));
+    assert!(controller.handle_event(
+        &key_event(label, KeyCode::KEY_LEFTCTRL, ButtonState::Up),
+        start + Duration::from_millis(120)
+    ));
+
+    let snapshot = controller.snapshot_at(start + Duration::from_millis(120));
+    assert_eq!(
+        snapshot.left_modifier_duration.multi,
+        Duration::from_millis(60)
+    );
+    assert_eq!(
+        snapshot.left_modifier_duration.shift,
+        Duration::from_millis(100)
+    );
+    assert_eq!(
+        snapshot.left_modifier_duration.ctrl,
+        Duration::from_millis(80)
     );
 }
 
