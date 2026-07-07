@@ -169,44 +169,36 @@ fn key_hand_config_from_source(
         return Ok(KeyHandUsageConfig::default());
     };
 
-    let profile = key_hand_profile_from_config(
-        profile.as_deref(),
-        KeyHandProfile::AnsiQwerty,
-        "usage.key_hand.profile",
-    )?;
-    let mut default_classifier = KeyHandClassifier::from_profile(profile);
-    apply_key_hand_overrides(
-        &mut default_classifier,
-        overrides,
-        "usage.key_hand.overrides",
-    )?;
+    let mut default_profile =
+        key_hand_profile_from_config(profile.as_deref(), "usage.key_hand.profile")?;
+    default_profile =
+        apply_key_hand_overrides(default_profile, overrides, "usage.key_hand.overrides")?;
 
-    let mut device_classifiers = Vec::new();
+    let mut device_profiles = Vec::new();
     if let Some(devices) = devices {
         for (label, device_config) in devices {
             let resolved =
                 resolve_usage_device_label(label_store, &label, "usage.key_hand.devices", "key")?;
             let config::DeviceKeyHandConfig { profile, overrides } = device_config;
-            let mut classifier = match profile {
-                Some(profile) => KeyHandClassifier::from_profile(key_hand_profile_from_config(
-                    Some(&profile),
-                    KeyHandProfile::AnsiQwerty,
+            let mut device_profile = match profile {
+                Some(profile) => parse_key_hand_profile(
+                    &profile,
                     &format!("usage.key_hand.devices.{label}.profile"),
-                )?),
-                None => default_classifier.clone(),
+                )?,
+                None => default_profile.clone(),
             };
-            apply_key_hand_overrides(
-                &mut classifier,
+            device_profile = apply_key_hand_overrides(
+                device_profile,
                 overrides,
                 &format!("usage.key_hand.devices.{label}.overrides"),
             )?;
-            device_classifiers.push((resolved, classifier));
+            device_profiles.push((resolved, device_profile));
         }
     }
 
     Ok(KeyHandUsageConfig {
-        default_classifier,
-        device_classifiers,
+        default_profile,
+        device_profiles,
     })
 }
 
@@ -226,41 +218,71 @@ fn resolve_usage_device_label(
 
 fn key_hand_profile_from_config(
     profile: Option<&str>,
-    default: KeyHandProfile,
     path: &str,
 ) -> Result<KeyHandProfile, Report> {
+    Ok(profile
+        .map(|profile| parse_key_hand_profile(profile, path))
+        .transpose()?
+        .unwrap_or_default())
+}
+
+fn parse_key_hand_profile(profile: &str, path: &str) -> Result<KeyHandProfile, Report> {
     match profile {
-        Some("ansi_qwerty") => Ok(KeyHandProfile::AnsiQwerty),
-        Some("none") => Ok(KeyHandProfile::None),
-        Some(other) => {
-            bail!("{path} has unsupported value {other:?}; expected \"ansi_qwerty\" or \"none\"")
+        "ansi_qwerty" => Ok(KeyHandProfile::UnclassifiedCustom(
+            KeyHandClassifier::ansi_qwerty(),
+        )),
+        "none" => Ok(KeyHandProfile::Unclassified),
+        "all_left" => Ok(KeyHandProfile::Left),
+        "all_right" => Ok(KeyHandProfile::Right),
+        other => {
+            bail!(
+                "{path} has unsupported value {other:?}; expected \"ansi_qwerty\", \"none\", \"all_left\", or \"all_right\""
+            )
         }
-        None => Ok(default),
     }
 }
 
 fn apply_key_hand_overrides(
-    classifier: &mut KeyHandClassifier,
+    profile: KeyHandProfile,
     overrides: Option<HashMap<String, config::KeyHandOverrideValue>>,
     path: &str,
-) -> Result<(), Report> {
-    if let Some(overrides) = overrides {
-        for (key_name, hand) in overrides {
-            let key = KeyCode::from_str(&key_name).map_err(|_| {
-                report!("{path} override key {key_name:?} is not a known evdev KeyCode")
-            })?;
-            classifier.set(key, key_hand_from_config_value(hand));
-        }
+) -> Result<KeyHandProfile, Report> {
+    let Some(overrides) = overrides else {
+        return Ok(profile);
+    };
+    if overrides.is_empty() {
+        return Ok(profile);
     }
 
-    Ok(())
+    let default = profile.default_hand();
+    let mut classifier = match profile {
+        KeyHandProfile::UnclassifiedCustom(classifier)
+        | KeyHandProfile::LeftCustom(classifier)
+        | KeyHandProfile::RightCustom(classifier) => classifier,
+        KeyHandProfile::Unclassified | KeyHandProfile::Left | KeyHandProfile::Right => {
+            KeyHandClassifier::new()
+        }
+    };
+
+    for (key_name, hand) in overrides {
+        let key = KeyCode::from_str(&key_name).map_err(|_| {
+            report!("{path} override key {key_name:?} is not a known evdev KeyCode")
+        })?;
+        classifier.set(key, key_hand_from_config_value(hand), default);
+    }
+
+    Ok(match default {
+        KeyHand::Unclassified => KeyHandProfile::UnclassifiedCustom(classifier),
+        KeyHand::Left => KeyHandProfile::LeftCustom(classifier),
+        KeyHand::Right => KeyHandProfile::RightCustom(classifier),
+    })
 }
 
 fn key_hand_from_config_value(value: config::KeyHandOverrideValue) -> KeyHand {
     match value {
         config::KeyHandOverrideValue::Left => KeyHand::Left,
         config::KeyHandOverrideValue::Right => KeyHand::Right,
-        config::KeyHandOverrideValue::Other => KeyHand::Other,
+        config::KeyHandOverrideValue::Other => KeyHand::Unclassified,
     }
 }
 
@@ -600,26 +622,103 @@ mod tests {
         assert_eq!(
             usage_config
                 .key_hand
-                .default_classifier
+                .default_profile
                 .classify(KeyCode::KEY_B),
             KeyHand::Left
         );
         assert_eq!(
             usage_config
                 .key_hand
-                .default_classifier
+                .default_profile
                 .classify(KeyCode::KEY_SPACE),
             KeyHand::Left
         );
 
-        let main_classifier = usage_config.key_hand.classifier_for(main_keyboard);
-        assert_eq!(main_classifier.classify(KeyCode::KEY_SPACE), KeyHand::Left);
-        assert_eq!(main_classifier.classify(KeyCode::KEY_B), KeyHand::Right);
+        let main_profile = usage_config.key_hand.profile_for(main_keyboard);
+        assert_eq!(main_profile.classify(KeyCode::KEY_SPACE), KeyHand::Left);
+        assert_eq!(main_profile.classify(KeyCode::KEY_B), KeyHand::Right);
 
-        let layer_classifier = usage_config.key_hand.classifier_for(layer_pad);
-        assert_eq!(layer_classifier.classify(KeyCode::KEY_A), KeyHand::Other);
-        assert_eq!(layer_classifier.classify(KeyCode::KEY_F13), KeyHand::Left);
-        assert_eq!(layer_classifier.classify(KeyCode::KEY_F14), KeyHand::Right);
+        let layer_profile = usage_config.key_hand.profile_for(layer_pad);
+        assert_eq!(
+            layer_profile.classify(KeyCode::KEY_A),
+            KeyHand::Unclassified
+        );
+        assert_eq!(layer_profile.classify(KeyCode::KEY_F13), KeyHand::Left);
+        assert_eq!(layer_profile.classify(KeyCode::KEY_F14), KeyHand::Right);
+    }
+
+    #[test]
+    fn key_hand_config_accepts_builtin_profiles() {
+        for (profile, key, expected) in [
+            ("ansi_qwerty", KeyCode::KEY_A, KeyHand::Left),
+            ("none", KeyCode::KEY_A, KeyHand::Unclassified),
+            ("all_left", KeyCode::KEY_PLAYPAUSE, KeyHand::Left),
+            ("all_right", KeyCode::KEY_PLAYPAUSE, KeyHand::Right),
+        ] {
+            let labels = DeviceLabelStore::new();
+            let usage_config = usage_config_from_sources(
+                Some(config::UsageConfig {
+                    exclude: None,
+                    key_hand: Some(config::KeyHandConfig {
+                        profile: Some(profile.to_string()),
+                        overrides: None,
+                        devices: None,
+                    }),
+                }),
+                &labels,
+            )
+            .expect("usage config should compile");
+
+            assert_eq!(
+                usage_config.key_hand.default_profile.classify(key),
+                expected,
+                "profile {profile:?} classified {key:?} unexpectedly"
+            );
+        }
+    }
+
+    #[test]
+    fn key_hand_overrides_on_constant_profiles_build_custom_map() {
+        for (profile, default, override_value, override_hand) in [
+            (
+                "all_left",
+                KeyHand::Left,
+                config::KeyHandOverrideValue::Right,
+                KeyHand::Right,
+            ),
+            (
+                "all_right",
+                KeyHand::Right,
+                config::KeyHandOverrideValue::Left,
+                KeyHand::Left,
+            ),
+        ] {
+            let labels = DeviceLabelStore::new();
+            let usage_config = usage_config_from_sources(
+                Some(config::UsageConfig {
+                    exclude: None,
+                    key_hand: Some(config::KeyHandConfig {
+                        profile: Some(profile.to_string()),
+                        overrides: Some(HashMap::from([
+                            ("KEY_A".to_string(), config::KeyHandOverrideValue::Other),
+                            ("KEY_J".to_string(), override_value),
+                        ])),
+                        devices: None,
+                    }),
+                }),
+                &labels,
+            )
+            .expect("usage config should compile");
+
+            let compiled_profile = &usage_config.key_hand.default_profile;
+            assert_eq!(compiled_profile.classify(KeyCode::KEY_B), default);
+            assert_eq!(compiled_profile.classify(KeyCode::KEY_PLAYPAUSE), default);
+            assert_eq!(
+                compiled_profile.classify(KeyCode::KEY_A),
+                KeyHand::Unclassified
+            );
+            assert_eq!(compiled_profile.classify(KeyCode::KEY_J), override_hand);
+        }
     }
 
     #[test]

@@ -547,7 +547,7 @@ impl Controller {
     }
 
     fn add_non_modifier_key(&mut self, label: DeviceLabel, key: KeyCode) {
-        match self.key_hand.classifier_for(label).classify(key) {
+        match self.key_hand.profile_for(label).classify(key) {
             KeyHand::Left if self.has_active_modifier_on(Side::Left) => {
                 self.snapshot.left_modifier_duration.combo =
                     self.snapshot.left_modifier_duration.combo.saturating_add(1);
@@ -571,10 +571,10 @@ impl Controller {
             KeyHand::Right => {
                 self.snapshot.key_count.right = self.snapshot.key_count.right.saturating_add(1);
             }
-            KeyHand::Other if self.has_active_modifiers() => {
+            KeyHand::Unclassified if self.has_active_modifiers() => {
                 self.snapshot.other_combo = self.snapshot.other_combo.saturating_add(1);
             }
-            KeyHand::Other => {
+            KeyHand::Unclassified => {
                 self.snapshot.key_count.other = self.snapshot.key_count.other.saturating_add(1);
             }
         }

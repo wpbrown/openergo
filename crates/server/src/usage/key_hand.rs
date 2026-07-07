@@ -9,13 +9,40 @@ const INLINE_WORD_CAPACITY: usize = INLINE_WORDS_PER_SIDE * 2;
 pub enum KeyHand {
     Left,
     Right,
-    Other,
+    Unclassified,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum KeyHandProfile {
-    AnsiQwerty,
-    None,
+    Unclassified,
+    Left,
+    Right,
+    UnclassifiedCustom(KeyHandClassifier),
+    LeftCustom(KeyHandClassifier),
+    RightCustom(KeyHandClassifier),
+}
+
+impl KeyHandProfile {
+    pub fn classify(&self, key: KeyCode) -> KeyHand {
+        match self {
+            Self::Unclassified => KeyHand::Unclassified,
+            Self::Left => KeyHand::Left,
+            Self::Right => KeyHand::Right,
+            Self::UnclassifiedCustom(classifier) => {
+                classifier.classify(key).unwrap_or(KeyHand::Unclassified)
+            }
+            Self::LeftCustom(classifier) => classifier.classify(key).unwrap_or(KeyHand::Left),
+            Self::RightCustom(classifier) => classifier.classify(key).unwrap_or(KeyHand::Right),
+        }
+    }
+
+    pub fn default_hand(&self) -> KeyHand {
+        match self {
+            Self::Unclassified | Self::UnclassifiedCustom(_) => KeyHand::Unclassified,
+            Self::Left | Self::LeftCustom(_) => KeyHand::Left,
+            Self::Right | Self::RightCustom(_) => KeyHand::Right,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -25,37 +52,30 @@ pub struct KeyHandClassifier {
 }
 
 impl KeyHandClassifier {
-    pub fn from_profile(profile: KeyHandProfile) -> Self {
-        match profile {
-            KeyHandProfile::AnsiQwerty => Self::ansi_qwerty(),
-            KeyHandProfile::None => Self::none(),
-        }
-    }
-
     pub fn ansi_qwerty() -> Self {
-        let mut classifier = Self::none();
+        let mut classifier = Self::new();
         for key in ANSI_QWERTY_LEFT {
-            classifier.set(*key, KeyHand::Left);
+            classifier.set(*key, KeyHand::Left, KeyHand::Unclassified);
         }
         for key in ANSI_QWERTY_RIGHT {
-            classifier.set(*key, KeyHand::Right);
+            classifier.set(*key, KeyHand::Right, KeyHand::Unclassified);
         }
         classifier
     }
 
-    pub fn none() -> Self {
+    pub fn new() -> Self {
         Self {
             words_per_side: 0,
             words: SmallVec::new(),
         }
     }
 
-    pub fn classify(&self, key: KeyCode) -> KeyHand {
+    pub fn classify(&self, key: KeyCode) -> Option<KeyHand> {
         let code = usize::from(key.code());
         let word_index = code / 64;
 
         if word_index >= self.words_per_side {
-            return KeyHand::Other;
+            return None;
         }
 
         let mask = 1_u64 << (code % 64);
@@ -63,26 +83,30 @@ impl KeyHandClassifier {
         let right = self.words[self.words_per_side + word_index];
 
         if left & mask != 0 {
-            KeyHand::Left
+            Some(KeyHand::Left)
         } else if right & mask != 0 {
-            KeyHand::Right
+            Some(KeyHand::Right)
         } else {
-            KeyHand::Other
+            Some(KeyHand::Unclassified)
         }
     }
 
-    pub fn set(&mut self, key: KeyCode, hand: KeyHand) {
+    pub fn set(&mut self, key: KeyCode, hand: KeyHand, default: KeyHand) {
+        if hand == KeyHand::Unclassified && default == KeyHand::Unclassified {
+            self.clear(key);
+            return;
+        }
+
+        self.ensure_words_for(key, default);
+        self.clear(key);
+
         let is_right = match hand {
             KeyHand::Left => false,
             KeyHand::Right => true,
-            KeyHand::Other => {
-                self.clear(key);
+            KeyHand::Unclassified => {
                 return;
             }
         };
-
-        self.ensure_words_for(key);
-        self.clear(key);
 
         let code = usize::from(key.code());
         let word_index = code / 64;
@@ -104,13 +128,19 @@ impl KeyHandClassifier {
         self.words[self.words_per_side + word_index] &= mask;
     }
 
-    fn ensure_words_for(&mut self, key: KeyCode) {
+    fn ensure_words_for(&mut self, key: KeyCode, default: KeyHand) {
         let required = words_for_code(key.code());
         if required <= self.words_per_side {
             return;
         }
 
         let mut words = smallvec![0; required * 2];
+        match default {
+            KeyHand::Left => words[..required].fill(u64::MAX),
+            KeyHand::Right => words[required..].fill(u64::MAX),
+            KeyHand::Unclassified => {}
+        }
+
         for index in 0..self.words_per_side {
             words[index] = self.words[index];
             words[required + index] = self.words[self.words_per_side + index];
@@ -123,22 +153,28 @@ impl KeyHandClassifier {
 
 impl Default for KeyHandClassifier {
     fn default() -> Self {
-        Self::ansi_qwerty()
+        Self::new()
+    }
+}
+
+impl Default for KeyHandProfile {
+    fn default() -> Self {
+        Self::UnclassifiedCustom(KeyHandClassifier::ansi_qwerty())
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct KeyHandUsageConfig {
-    pub default_classifier: KeyHandClassifier,
-    pub device_classifiers: Vec<(DeviceLabel, KeyHandClassifier)>,
+    pub default_profile: KeyHandProfile,
+    pub device_profiles: Vec<(DeviceLabel, KeyHandProfile)>,
 }
 
 impl KeyHandUsageConfig {
-    pub fn classifier_for(&self, label: DeviceLabel) -> &KeyHandClassifier {
-        self.device_classifiers
+    pub fn profile_for(&self, label: DeviceLabel) -> &KeyHandProfile {
+        self.device_profiles
             .iter()
-            .find_map(|(device_label, classifier)| (*device_label == label).then_some(classifier))
-            .unwrap_or(&self.default_classifier)
+            .find_map(|(device_label, profile)| (*device_label == label).then_some(profile))
+            .unwrap_or(&self.default_profile)
     }
 }
 
@@ -265,10 +301,17 @@ mod tests {
     fn ansi_qwerty_classifies_representative_keys_without_spilling() {
         let classifier = KeyHandClassifier::ansi_qwerty();
 
-        assert_eq!(classifier.classify(KeyCode::KEY_B), KeyHand::Left);
-        assert_eq!(classifier.classify(KeyCode::KEY_J), KeyHand::Right);
-        assert_eq!(classifier.classify(KeyCode::KEY_SPACE), KeyHand::Other);
-        assert_eq!(classifier.classify(KeyCode::KEY_PLAYPAUSE), KeyHand::Other);
+        assert_eq!(classifier.classify(KeyCode::KEY_B), Some(KeyHand::Left));
+        assert_eq!(classifier.classify(KeyCode::KEY_J), Some(KeyHand::Right));
+        assert_eq!(
+            classifier.classify(KeyCode::KEY_SPACE),
+            Some(KeyHand::Unclassified)
+        );
+        assert_eq!(
+            classifier.classify(KeyCode::KEY_PLAYPAUSE),
+            Some(KeyHand::Unclassified)
+        );
+        assert_eq!(classifier.classify(KeyCode::new(512)), None);
         assert_eq!(classifier.words_per_side, INLINE_WORDS_PER_SIDE);
         assert!(!classifier.words.spilled());
     }
@@ -277,22 +320,66 @@ mod tests {
     fn overrides_remove_prior_side_membership() {
         let mut classifier = KeyHandClassifier::ansi_qwerty();
 
-        classifier.set(KeyCode::KEY_B, KeyHand::Right);
-        classifier.set(KeyCode::KEY_SPACE, KeyHand::Left);
+        classifier.set(KeyCode::KEY_B, KeyHand::Right, KeyHand::Unclassified);
+        classifier.set(KeyCode::KEY_SPACE, KeyHand::Left, KeyHand::Unclassified);
 
-        assert_eq!(classifier.classify(KeyCode::KEY_B), KeyHand::Right);
-        assert_eq!(classifier.classify(KeyCode::KEY_SPACE), KeyHand::Left);
+        assert_eq!(classifier.classify(KeyCode::KEY_B), Some(KeyHand::Right));
+        assert_eq!(classifier.classify(KeyCode::KEY_SPACE), Some(KeyHand::Left));
 
-        classifier.set(KeyCode::KEY_B, KeyHand::Other);
-        assert_eq!(classifier.classify(KeyCode::KEY_B), KeyHand::Other);
+        classifier.set(KeyCode::KEY_B, KeyHand::Unclassified, KeyHand::Unclassified);
+        assert_eq!(
+            classifier.classify(KeyCode::KEY_B),
+            Some(KeyHand::Unclassified)
+        );
     }
 
     #[test]
-    fn none_profile_starts_empty() {
-        let classifier = KeyHandClassifier::none();
+    fn new_classifier_starts_empty() {
+        let classifier = KeyHandClassifier::new();
 
-        assert_eq!(classifier.classify(KeyCode::KEY_A), KeyHand::Other);
-        assert_eq!(classifier.classify(KeyCode::KEY_J), KeyHand::Other);
+        assert_eq!(classifier.classify(KeyCode::KEY_A), None);
+        assert_eq!(classifier.classify(KeyCode::KEY_J), None);
+    }
+
+    #[test]
+    fn set_with_default_prefills_growth() {
+        let mut classifier = KeyHandClassifier::new();
+
+        classifier.set(KeyCode::KEY_SPACE, KeyHand::Unclassified, KeyHand::Left);
+
+        assert_eq!(classifier.classify(KeyCode::KEY_A), Some(KeyHand::Left));
+        assert_eq!(classifier.classify(KeyCode::KEY_PLAYPAUSE), None);
+        assert_eq!(
+            classifier.classify(KeyCode::KEY_SPACE),
+            Some(KeyHand::Unclassified)
+        );
+    }
+
+    #[test]
+    fn profile_applies_default_outside_custom_map() {
+        let mut classifier = KeyHandClassifier::new();
+        classifier.set(KeyCode::KEY_SPACE, KeyHand::Unclassified, KeyHand::Left);
+        let profile = KeyHandProfile::LeftCustom(classifier);
+
+        assert_eq!(profile.classify(KeyCode::KEY_A), KeyHand::Left);
+        assert_eq!(profile.classify(KeyCode::KEY_PLAYPAUSE), KeyHand::Left);
+        assert_eq!(profile.classify(KeyCode::KEY_SPACE), KeyHand::Unclassified);
+    }
+
+    #[test]
+    fn profile_variants_classify_directly() {
+        assert_eq!(
+            KeyHandProfile::Left.classify(KeyCode::KEY_PLAYPAUSE),
+            KeyHand::Left
+        );
+        assert_eq!(
+            KeyHandProfile::Right.classify(KeyCode::KEY_PLAYPAUSE),
+            KeyHand::Right
+        );
+        assert_eq!(
+            KeyHandProfile::Unclassified.classify(KeyCode::KEY_A),
+            KeyHand::Unclassified
+        );
     }
 
     #[test]
@@ -300,33 +387,31 @@ mod tests {
         let mut classifier = KeyHandClassifier::ansi_qwerty();
         let high_key = KeyCode::new(512);
 
-        classifier.set(high_key, KeyHand::Left);
+        classifier.set(high_key, KeyHand::Left, KeyHand::Unclassified);
 
-        assert_eq!(classifier.classify(high_key), KeyHand::Left);
+        assert_eq!(classifier.classify(high_key), Some(KeyHand::Left));
         assert!(classifier.words.spilled());
     }
 
     #[test]
-    fn device_classifier_selection_falls_back_to_default() {
+    fn device_profile_selection_falls_back_to_default() {
         let mut labels = DeviceLabelStore::new();
         let default_label = labels.get_or_intern("default");
         let custom_label = labels.get_or_intern("custom");
-        let mut custom = KeyHandClassifier::none();
-        custom.set(KeyCode::KEY_SPACE, KeyHand::Right);
+        let mut custom = KeyHandClassifier::new();
+        custom.set(KeyCode::KEY_SPACE, KeyHand::Right, KeyHand::Unclassified);
         let config = KeyHandUsageConfig {
-            default_classifier: KeyHandClassifier::ansi_qwerty(),
-            device_classifiers: vec![(custom_label, custom)],
+            default_profile: KeyHandProfile::default(),
+            device_profiles: vec![(custom_label, KeyHandProfile::UnclassifiedCustom(custom))],
         };
 
         assert_eq!(
-            config
-                .classifier_for(default_label)
-                .classify(KeyCode::KEY_A),
+            config.profile_for(default_label).classify(KeyCode::KEY_A),
             KeyHand::Left
         );
         assert_eq!(
             config
-                .classifier_for(custom_label)
+                .profile_for(custom_label)
                 .classify(KeyCode::KEY_SPACE),
             KeyHand::Right
         );

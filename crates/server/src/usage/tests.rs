@@ -3,7 +3,7 @@ use crate::device_events::DeviceLabelStore;
 use bachelor::broadcast::spmc::{SpmcBroadcastProducer, SpmcBroadcastSource, broadcast};
 use evdev::KeyCode;
 use futures::FutureExt;
-use key_hand::{KeyHand, KeyHandClassifier, KeyHandUsageConfig};
+use key_hand::{KeyHand, KeyHandClassifier, KeyHandProfile, KeyHandUsageConfig};
 use std::num::NonZeroUsize;
 use tokio::task::JoinHandle;
 
@@ -695,13 +695,16 @@ fn non_modifier_key_down_uses_device_specific_classifier() {
     let mut labels = DeviceLabelStore::new();
     let default_label = labels.get_or_intern("keyboard");
     let custom_label = labels.get_or_intern("thumb_board");
-    let mut custom_classifier = KeyHandClassifier::none();
-    custom_classifier.set(KeyCode::KEY_SPACE, KeyHand::Right);
+    let mut custom_classifier = KeyHandClassifier::new();
+    custom_classifier.set(KeyCode::KEY_SPACE, KeyHand::Right, KeyHand::Unclassified);
     let mut controller = Controller::new(
         DragConfig::default(),
         KeyHandUsageConfig {
-            default_classifier: KeyHandClassifier::ansi_qwerty(),
-            device_classifiers: vec![(custom_label, custom_classifier)],
+            default_profile: KeyHandProfile::default(),
+            device_profiles: vec![(
+                custom_label,
+                KeyHandProfile::UnclassifiedCustom(custom_classifier),
+            )],
         },
     );
     let now = Instant::now();
