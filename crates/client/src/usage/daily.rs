@@ -144,6 +144,33 @@ async fn run(
     }
 }
 
+fn calculate_next_reset_time(now: &Zoned, reset_time: &Time) -> Zoned {
+    fn expect_no_oob<T>(result: Result<T, jiff::Error>) -> T {
+        result.expect("calculation should not be near bounds of Timestamp since we start from now")
+    }
+
+    let today = now.date();
+    let datetime = today.at(
+        reset_time.hour(),
+        reset_time.minute(),
+        reset_time.second(),
+        reset_time.subsec_nanosecond(),
+    );
+    let target = expect_no_oob(now.time_zone().to_ambiguous_zoned(datetime).later());
+
+    if target.timestamp() > now.timestamp() {
+        target
+    } else {
+        let tomorrow_datetime = expect_no_oob(datetime.tomorrow());
+
+        expect_no_oob(
+            now.time_zone()
+                .to_ambiguous_zoned(tomorrow_datetime)
+                .later(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,32 +221,5 @@ mod tests {
         assert_eq!(state.usage().right.key_count, 5);
         assert_eq!(state.credit().base.left.drag, Credit::new(6.0));
         assert_eq!(state.credit().base.right.key, Credit::new(5.0));
-    }
-}
-
-fn calculate_next_reset_time(now: &Zoned, reset_time: &Time) -> Zoned {
-    fn expect_no_oob<T>(result: Result<T, jiff::Error>) -> T {
-        result.expect("calculation should not be near bounds of Timestamp since we start from now")
-    }
-
-    let today = now.date();
-    let datetime = today.at(
-        reset_time.hour(),
-        reset_time.minute(),
-        reset_time.second(),
-        reset_time.subsec_nanosecond(),
-    );
-    let target = expect_no_oob(now.time_zone().to_ambiguous_zoned(datetime).later());
-
-    if target.timestamp() > now.timestamp() {
-        target
-    } else {
-        let tomorrow_datetime = expect_no_oob(datetime.tomorrow());
-
-        expect_no_oob(
-            now.time_zone()
-                .to_ambiguous_zoned(tomorrow_datetime)
-                .later(),
-        )
     }
 }
