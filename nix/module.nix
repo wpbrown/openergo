@@ -6,6 +6,7 @@
 }:
 let
   cfg = config.services.openergo;
+  tomlFormat = pkgs.formats.toml { };
   inherit (lib)
     mkEnableOption
     mkOption
@@ -13,92 +14,102 @@ let
     types
     ;
 
+  filterNulls = lib.filterAttrs (_: value: value != null);
+
+  cleanToml =
+    value:
+    if builtins.isAttrs value then
+      lib.mapAttrs (_: cleanToml) (filterNulls value)
+    else if builtins.isList value then
+      map cleanToml value
+    else
+      value;
+
+  emptyAttrsToNull = attrs: if attrs == { } then null else attrs;
+  emptyListToNull = values: if values == [ ] then null else values;
+  settingsDwellClickAllow = lib.attrByPath [ "dwell_click" "allow" ] false cfg.settings == true;
+  systemdDwellClickAllow = cfg.dwellClick.allow || settingsDwellClickAllow;
+
   deviceMatcherType = types.submodule {
     options = {
       path = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "Device path — matched against DEVNAME and DEVLINKS.";
+        description = "Device path matched against DEVNAME and DEVLINKS.";
       };
       name = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "Matched against the evdev device name (udev `NAME` property).";
+        description = "Matched against the evdev device name.";
       };
       model = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "Matched against udev `ID_MODEL`.";
+        description = "Matched against udev ID_MODEL.";
       };
       model_id = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "Matched against udev `ID_MODEL_ID`.";
+        description = "Matched against udev ID_MODEL_ID.";
       };
       vendor_id = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "Matched against udev `ID_VENDOR_ID`.";
+        description = "Matched against udev ID_VENDOR_ID.";
       };
       serial = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "Matched against udev `ID_SERIAL`.";
+        description = "Matched against udev ID_SERIAL.";
       };
       bus = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "Matched against udev `ID_BUS`.";
+        description = "Matched against udev ID_BUS.";
       };
     };
   };
 
-  filterNulls = lib.filterAttrs (_: v: v != null);
-
-  deviceMatcherToToml =
-    m:
-    filterNulls {
-      inherit (m)
-        path
-        name
-        model
-        model_id
-        vendor_id
-        serial
-        bus
-        ;
+  serverUsageDeviceType = types.submodule {
+    options = {
+      hand = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Hand used for pointer events from this device.";
+      };
+      keyProfile = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Key classification profile for key/button events.";
+      };
+      keyOverrides = mkOption {
+        type = types.attrsOf types.str;
+        default = { };
+        description = "Per-key handedness overrides, keyed by evdev key code name.";
+      };
     };
-
-  deviceMatcherIsEmpty = m: deviceMatcherToToml m == { };
-
-  # `builtins.match` is implicitly anchored, so `+` enforces non-empty.
-  validLabelRegex = "[A-Za-z0-9_-]+";
-  isValidLabel = label: builtins.match validLabelRegex label != null;
+  };
 
   clientMidiControlType = types.submodule {
     options = {
       message = mkOption {
-        type = types.enum [
-          "cc"
-          "note"
-        ];
+        type = types.nullOr types.str;
+        default = null;
         description = "MIDI message kind for this control.";
       };
       channel = mkOption {
-        type = types.ints.between 0 15;
-        description = "MIDI channel, 0–15.";
+        type = types.nullOr types.int;
+        default = null;
+        description = "MIDI channel.";
       };
       number = mkOption {
-        type = types.ints.between 0 127;
-        description = "MIDI CC number or note number, 0–127.";
+        type = types.nullOr types.int;
+        default = null;
+        description = "MIDI CC number or note number.";
       };
       direction = mkOption {
-        type = types.enum [
-          "in"
-          "out"
-          "inout"
-        ];
-        default = "in";
+        type = types.nullOr types.str;
+        default = null;
         description = "Direction of this endpoint relative to the client.";
       };
     };
@@ -107,7 +118,8 @@ let
   clientDeviceType = types.submodule {
     options = {
       type = mkOption {
-        type = types.enum [ "midi" ];
+        type = types.nullOr types.str;
+        default = null;
         description = "Kind of client integration device.";
       };
       port = mkOption {
@@ -123,10 +135,7 @@ let
       controls = mkOption {
         type = types.attrsOf clientMidiControlType;
         default = { };
-        description = ''
-          MIDI controls keyed by global control label. Pain sources and credit
-          sinks reference these labels directly.
-        '';
+        description = "Per-control map keyed by global control label.";
       };
     };
   };
@@ -134,16 +143,49 @@ let
   painSourceType = types.submodule {
     options = {
       source = mkOption {
-        type = types.str;
-        description = "Reference to a control label under `services.openergo.client.devices.*.controls`.";
+        type = types.nullOr types.str;
+        default = null;
+        description = "Reference to a global control label.";
       };
       bias = mkOption {
-        type = types.enum [
-          "left"
-          "right"
-          "center"
-        ];
-        description = "How this signal weights toward left/right/center for downstream strain accounting.";
+        type = types.nullOr types.str;
+        default = null;
+        description = "Pain bias used for downstream strain accounting.";
+      };
+    };
+  };
+
+  notificationsType = types.submodule {
+    options = {
+      notifications = mkOption {
+        type = types.nullOr types.bool;
+        default = null;
+        description = "Whether notifications are enabled.";
+      };
+      sounds = mkOption {
+        type = types.nullOr types.bool;
+        default = null;
+        description = "Whether notification sounds are enabled.";
+      };
+    };
+  };
+
+  painCheckType = types.submodule {
+    options = {
+      indicator = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Control label used as the pain-check indicator.";
+      };
+      acknowledge = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Control label used to acknowledge a pain check.";
+      };
+      notifications = mkOption {
+        type = types.nullOr notificationsType;
+        default = null;
+        description = "Optional pain-check notification settings.";
       };
     };
   };
@@ -151,18 +193,18 @@ let
   creditLimitsType = types.submodule {
     options = {
       rest = mkOption {
-        type = types.number;
-        default = 800.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Rest-break credit budget.";
       };
       breaks = mkOption {
-        type = types.number;
-        default = 2000.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Longer break credit budget.";
       };
       day = mkOption {
-        type = types.number;
-        default = 30000.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Daily credit budget.";
       };
     };
@@ -188,47 +230,32 @@ let
     };
   };
 
-  creditNotificationsType = types.submodule {
-    options = {
-      notifications = mkOption {
-        type = types.bool;
-        default = false;
-        description = "Whether the client shows credit notifications.";
-      };
-      sounds = mkOption {
-        type = types.bool;
-        default = false;
-        description = "Whether the client plays credit notification sounds.";
-      };
-    };
-  };
-
   modifierCostType = types.submodule {
     options = {
       shiftPerSec = mkOption {
-        type = types.number;
-        default = 5.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Credit cost per second while shift is held.";
       };
       ctrlPerSec = mkOption {
-        type = types.number;
-        default = 5.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Credit cost per second while control is held.";
       };
       altPerSec = mkOption {
-        type = types.number;
-        default = 3.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Credit cost per second while alt is held.";
       };
       metaPerSec = mkOption {
-        type = types.number;
-        default = 3.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Credit cost per second while meta is held.";
       };
       multiPerSec = mkOption {
-        type = types.number;
-        default = 1.0;
-        description = "Additional credit cost per second while multiple same-hand modifiers overlap.";
+        type = types.nullOr types.number;
+        default = null;
+        description = "Additional cost per second while multiple same-hand modifiers overlap.";
       };
     };
   };
@@ -236,33 +263,33 @@ let
   handCostType = types.submodule {
     options = {
       click = mkOption {
-        type = types.number;
-        default = 2.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Credit cost per click for this hand.";
       };
       dragPerSec = mkOption {
-        type = types.number;
-        default = 3.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Credit cost per second while dragging with this hand.";
       };
       key = mkOption {
-        type = types.number;
-        default = 1.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Credit cost per ordinary key press for this hand.";
       };
       scroll = mkOption {
-        type = types.number;
-        default = 0.25;
+        type = types.nullOr types.number;
+        default = null;
         description = "Credit cost per scroll event for this hand.";
       };
       sameHandCombo = mkOption {
-        type = types.number;
-        default = 1.25;
-        description = "Credit cost per same-hand modifier combo key event for this hand.";
+        type = types.nullOr types.number;
+        default = null;
+        description = "Credit cost per same-hand modifier combo key event.";
       };
       modifier = mkOption {
-        type = modifierCostType;
-        default = { };
+        type = types.nullOr modifierCostType;
+        default = null;
         description = "Credit costs for modifier keys on this hand.";
       };
     };
@@ -271,13 +298,13 @@ let
   unclassifiedCostType = types.submodule {
     options = {
       key = mkOption {
-        type = types.number;
-        default = 1.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Credit cost per unclassified ordinary key press.";
       };
       combo = mkOption {
-        type = types.number;
-        default = 1.10;
+        type = types.nullOr types.number;
+        default = null;
         description = "Credit cost per unclassified modifier combo key event.";
       };
     };
@@ -286,23 +313,23 @@ let
   creditCostsType = types.submodule {
     options = {
       hand = mkOption {
-        type = handCostType;
-        default = { };
+        type = types.nullOr handCostType;
+        default = null;
         description = "Default credit costs shared by both hands.";
       };
       left = mkOption {
-        type = handCostType;
-        default = { };
+        type = types.nullOr handCostType;
+        default = null;
         description = "Left-hand credit cost overrides.";
       };
       right = mkOption {
-        type = handCostType;
-        default = { };
+        type = types.nullOr handCostType;
+        default = null;
         description = "Right-hand credit cost overrides.";
       };
       unclassified = mkOption {
-        type = unclassifiedCostType;
-        default = { };
+        type = types.nullOr unclassifiedCostType;
+        default = null;
         description = "Credit costs for key events that cannot be assigned to a hand.";
       };
     };
@@ -311,7 +338,8 @@ let
   partialRateBoostType = types.submodule {
     options = {
       baselinePerSec = mkOption {
-        type = types.number;
+        type = types.nullOr types.number;
+        default = null;
         description = "Baseline event rate per second for this signal.";
       };
       enabled = mkOption {
@@ -340,23 +368,23 @@ let
   creditRateBoostType = types.submodule {
     options = {
       enabled = mkOption {
-        type = types.bool;
-        default = true;
+        type = types.nullOr types.bool;
+        default = null;
         description = "Default rate boost enablement.";
       };
       factor = mkOption {
-        type = types.number;
-        default = 0.25;
+        type = types.nullOr types.number;
+        default = null;
         description = "Default rate boost factor.";
       };
       cap = mkOption {
-        type = types.number;
-        default = 1.75;
+        type = types.nullOr types.number;
+        default = null;
         description = "Default rate boost cap.";
       };
       smoothingSecs = mkOption {
-        type = types.number;
-        default = 3.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Default rate boost smoothing window, in seconds.";
       };
       key = mkOption {
@@ -390,246 +418,189 @@ let
   globalCreditBoostType = types.submodule {
     options = {
       enabled = mkOption {
-        type = types.bool;
-        default = false;
+        type = types.nullOr types.bool;
+        default = null;
         description = "Whether global credit boost is enabled.";
       };
       baselineCreditPerSec = mkOption {
-        type = types.number;
-        default = 8.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Baseline total credit rate per second.";
       };
       factor = mkOption {
-        type = types.number;
-        default = 0.20;
+        type = types.nullOr types.number;
+        default = null;
         description = "Global credit boost factor.";
       };
       cap = mkOption {
-        type = types.number;
-        default = 1.5;
+        type = types.nullOr types.number;
+        default = null;
         description = "Global credit boost cap.";
       };
       smoothingSecs = mkOption {
-        type = types.number;
-        default = 10.0;
+        type = types.nullOr types.number;
+        default = null;
         description = "Global credit boost smoothing window, in seconds.";
       };
     };
   };
 
-  clientControlEntries = lib.flatten (
-    lib.mapAttrsToList (
-      deviceLabel: device:
-      lib.mapAttrsToList (controlLabel: control: {
-        inherit deviceLabel controlLabel control;
-      }) device.controls
-    ) cfg.client.devices
+  deviceMatcherToToml =
+    m:
+    cleanToml {
+      inherit (m)
+        path
+        name
+        model
+        model_id
+        vendor_id
+        serial
+        bus
+        ;
+    };
+
+  serverUsageDeviceToToml =
+    d:
+    cleanToml {
+      inherit (d) hand;
+      key_profile = d.keyProfile;
+      key_overrides = emptyAttrsToNull d.keyOverrides;
+    };
+
+  serverConfigFromOptions = cleanToml {
+    dwell_click = if cfg.dwellClick.allow then { allow = true; } else null;
+    devices = emptyAttrsToNull (cleanToml {
+      auto_detect = cfg.devices.autoDetect;
+      include = emptyAttrsToNull (lib.mapAttrs (_: deviceMatcherToToml) cfg.devices.include);
+      exclude = emptyAttrsToNull (lib.mapAttrs (_: deviceMatcherToToml) cfg.devices.exclude);
+    });
+    usage = emptyAttrsToNull (cleanToml {
+      default_pointer_hand = cfg.usage.defaultPointerHand;
+      exclude = emptyListToNull cfg.usage.exclude;
+      devices = emptyAttrsToNull (lib.mapAttrs (_: serverUsageDeviceToToml) cfg.usage.devices);
+    });
+  };
+
+  configToml = tomlFormat.generate "openergo.toml" (
+    lib.recursiveUpdate serverConfigFromOptions cfg.settings
   );
 
-  clientControlLabels = map (entry: entry.controlLabel) clientControlEntries;
-  hasDuplicates = values: builtins.length (lib.unique values) != builtins.length values;
-  controlForLabel =
-    label: lib.findFirst (entry: entry.controlLabel == label) null clientControlEntries;
-  controlAllowsIn = control: control.direction == "in" || control.direction == "inout";
-  controlAllowsOut = control: control.direction == "out" || control.direction == "inout";
-  midiTupleKey = control: "${control.message}:${toString control.channel}:${toString control.number}";
-
-  assertPositive = name: value: {
-    assertion = value > 0;
-    message = "${name} must be > 0";
-  };
-
-  assertNonNegative = name: value: {
-    assertion = value >= 0;
-    message = "${name} must be >= 0";
-  };
-
-  assertAtLeastOne = name: value: {
-    assertion = value >= 1;
-    message = "${name} must be >= 1";
-  };
-
-  nullableNonNegativeAssertion =
-    name: value: lib.optional (value != null) (assertNonNegative name value);
-  nullablePositiveAssertion = name: value: lib.optional (value != null) (assertPositive name value);
-  nullableAtLeastOneAssertion =
-    name: value: lib.optional (value != null) (assertAtLeastOne name value);
-
-  modifierCostAssertions = prefix: costs: [
-    (assertNonNegative "${prefix}.shiftPerSec" costs.shiftPerSec)
-    (assertNonNegative "${prefix}.ctrlPerSec" costs.ctrlPerSec)
-    (assertNonNegative "${prefix}.altPerSec" costs.altPerSec)
-    (assertNonNegative "${prefix}.metaPerSec" costs.metaPerSec)
-    (assertNonNegative "${prefix}.multiPerSec" costs.multiPerSec)
-  ];
-
-  handCostAssertions =
-    prefix: costs:
-    [
-      (assertNonNegative "${prefix}.click" costs.click)
-      (assertNonNegative "${prefix}.dragPerSec" costs.dragPerSec)
-      (assertNonNegative "${prefix}.key" costs.key)
-      (assertNonNegative "${prefix}.scroll" costs.scroll)
-      (assertNonNegative "${prefix}.sameHandCombo" costs.sameHandCombo)
-    ]
-    ++ modifierCostAssertions "${prefix}.modifier" costs.modifier;
-
-  unclassifiedCostAssertions = prefix: costs: [
-    (assertNonNegative "${prefix}.key" costs.key)
-    (assertNonNegative "${prefix}.combo" costs.combo)
-  ];
-
-  partialRateBoostAssertions =
-    prefix: boost:
-    lib.optionals (boost != null) (
-      [ (assertPositive "${prefix}.baselinePerSec" boost.baselinePerSec) ]
-      ++ nullableNonNegativeAssertion "${prefix}.factor" boost.factor
-      ++ nullableAtLeastOneAssertion "${prefix}.cap" boost.cap
-      ++ nullablePositiveAssertion "${prefix}.smoothingSecs" boost.smoothingSecs
-    );
-
-  rateBoostAssertions =
-    prefix: boost:
-    lib.optionals (boost != null) (
-      [
-        (assertNonNegative "${prefix}.factor" boost.factor)
-        (assertAtLeastOne "${prefix}.cap" boost.cap)
-        (assertPositive "${prefix}.smoothingSecs" boost.smoothingSecs)
-      ]
-      ++ partialRateBoostAssertions "${prefix}.key" boost.key
-      ++ partialRateBoostAssertions "${prefix}.click" boost.click
-      ++ partialRateBoostAssertions "${prefix}.scroll" boost.scroll
-      ++ partialRateBoostAssertions "${prefix}.drag" boost.drag
-      ++ partialRateBoostAssertions "${prefix}.modifier" boost.modifier
-    );
-
-  matcherAssertions =
-    section: matchers:
-    lib.flatten (
-      lib.mapAttrsToList (
-        label: matcher:
-        if !isValidLabel label then
-          [
-            {
-              assertion = false;
-              message = "services.openergo.devices.${section} key \"${label}\" is not a valid label (must be non-empty ASCII alphanumerics, '_' or '-')";
-            }
-          ]
-        else
-          [
-            {
-              assertion = !deviceMatcherIsEmpty matcher;
-              message = "services.openergo.devices.${section}.${label} has no fields set";
-            }
-          ]
-      ) matchers
-    );
-
-  configToml =
-    let
-      dwellClickSection = lib.optionalAttrs cfg.dwellClick.allow {
-        dwell_click = {
-          allow = cfg.dwellClick.allow;
-        };
-      };
-      devicesSection =
-        lib.optionalAttrs
-          (!cfg.devices.autoDetect || cfg.devices.include != { } || cfg.devices.exclude != { })
-          {
-            devices = filterNulls {
-              auto_detect = cfg.devices.autoDetect;
-              include =
-                if cfg.devices.include == { } then
-                  null
-                else
-                  lib.mapAttrs (_: deviceMatcherToToml) cfg.devices.include;
-              exclude =
-                if cfg.devices.exclude == { } then
-                  null
-                else
-                  lib.mapAttrs (_: deviceMatcherToToml) cfg.devices.exclude;
-            };
-          };
-      usageSection = lib.optionalAttrs (cfg.usage.exclude != [ ]) {
-        usage.exclude = cfg.usage.exclude;
-      };
-    in
-    (pkgs.formats.toml { }).generate "openergo.toml" (
-      dwellClickSection // devicesSection // usageSection
-    );
+  clientMidiControlToToml =
+    c:
+    cleanToml {
+      inherit (c)
+        message
+        channel
+        number
+        direction
+        ;
+    };
 
   clientDeviceToToml =
     d:
-    filterNulls {
-      type = "midi";
-      inherit (d) port client;
-      controls = lib.mapAttrs (_: clientMidiControlToToml) d.controls;
+    cleanToml {
+      inherit (d)
+        type
+        port
+        client
+        ;
+      controls = emptyAttrsToNull (lib.mapAttrs (_: clientMidiControlToToml) d.controls);
     };
 
-  clientMidiControlToToml = c: {
-    inherit (c)
-      message
-      channel
-      number
-      direction
-      ;
-  };
+  painSourceToToml =
+    source:
+    cleanToml {
+      inherit (source) source bias;
+    };
 
-  creditLimitsToToml = limits: {
-    inherit (limits) rest day;
-    "break" = limits.breaks;
-  };
+  notificationsToToml =
+    notifications:
+    cleanToml {
+      inherit (notifications) notifications sounds;
+    };
+
+  painCheckToToml =
+    check:
+    cleanToml {
+      inherit (check) indicator acknowledge;
+      notifications =
+        if check.notifications == null then null else notificationsToToml check.notifications;
+    };
+
+  creditLimitsToToml =
+    limits:
+    cleanToml {
+      inherit (limits) rest day;
+      "break" = limits.breaks;
+    };
 
   creditUtilizationToToml =
     util:
-    filterNulls {
+    cleanToml {
       rest_sink = util.restSink;
       breaks_sink = util.breaksSink;
       day_sink = util.daySink;
     };
 
-  creditNotificationsToToml = notifications: {
-    inherit (notifications) notifications sounds;
-  };
+  modifierCostsToToml =
+    costs:
+    cleanToml {
+      shift_per_sec = costs.shiftPerSec;
+      ctrl_per_sec = costs.ctrlPerSec;
+      alt_per_sec = costs.altPerSec;
+      meta_per_sec = costs.metaPerSec;
+      multi_per_sec = costs.multiPerSec;
+    };
 
-  modifierCostsToToml = costs: {
-    shift_per_sec = costs.shiftPerSec;
-    ctrl_per_sec = costs.ctrlPerSec;
-    alt_per_sec = costs.altPerSec;
-    meta_per_sec = costs.metaPerSec;
-    multi_per_sec = costs.multiPerSec;
-  };
+  handCostsToToml =
+    costs:
+    cleanToml {
+      inherit (costs)
+        click
+        key
+        scroll
+        ;
+      drag_per_sec = costs.dragPerSec;
+      same_hand_combo = costs.sameHandCombo;
+      modifier = if costs.modifier == null then null else modifierCostsToToml costs.modifier;
+    };
 
-  handCostsToToml = costs: {
-    inherit (costs) click key scroll;
-    drag_per_sec = costs.dragPerSec;
-    same_hand_combo = costs.sameHandCombo;
-    modifier = modifierCostsToToml costs.modifier;
-  };
+  unclassifiedCostsToToml =
+    costs:
+    cleanToml {
+      inherit (costs) key combo;
+    };
 
-  unclassifiedCostsToToml = costs: {
-    inherit (costs) key combo;
-  };
-
-  creditCostsToToml = costs: {
-    hand = handCostsToToml costs.hand;
-    left = handCostsToToml costs.left;
-    right = handCostsToToml costs.right;
-    unclassified = unclassifiedCostsToToml costs.unclassified;
-  };
+  creditCostsToToml =
+    costs:
+    cleanToml {
+      hand = if costs.hand == null then null else handCostsToToml costs.hand;
+      left = if costs.left == null then null else handCostsToToml costs.left;
+      right = if costs.right == null then null else handCostsToToml costs.right;
+      unclassified =
+        if costs.unclassified == null then null else unclassifiedCostsToToml costs.unclassified;
+    };
 
   partialRateBoostToToml =
     boost:
-    filterNulls {
+    cleanToml {
       baseline_per_sec = boost.baselinePerSec;
-      inherit (boost) enabled factor cap;
+      inherit (boost)
+        enabled
+        factor
+        cap
+        ;
       smoothing_secs = boost.smoothingSecs;
     };
 
   creditRateBoostToToml =
     boost:
-    filterNulls {
-      inherit (boost) enabled factor cap;
+    cleanToml {
+      inherit (boost)
+        enabled
+        factor
+        cap
+        ;
       smoothing_secs = boost.smoothingSecs;
       key = if boost.key == null then null else partialRateBoostToToml boost.key;
       click = if boost.click == null then null else partialRateBoostToToml boost.click;
@@ -638,32 +609,34 @@ let
       modifier = if boost.modifier == null then null else partialRateBoostToToml boost.modifier;
     };
 
-  globalCreditBoostToToml = boost: {
-    inherit (boost) enabled factor cap;
-    baseline_credit_per_sec = boost.baselineCreditPerSec;
-    smoothing_secs = boost.smoothingSecs;
-  };
+  globalCreditBoostToToml =
+    boost:
+    cleanToml {
+      inherit (boost)
+        enabled
+        factor
+        cap
+        ;
+      baseline_credit_per_sec = boost.baselineCreditPerSec;
+      smoothing_secs = boost.smoothingSecs;
+    };
 
-  clientConfigToml =
+  clientConfigFromOptions =
     let
-      telemetrySection = lib.optionalAttrs cfg.client.telemetry.reportUsage {
-        telemetry.report_usage = cfg.client.telemetry.reportUsage;
+      telemetryAttrs = cleanToml {
+        report_usage = cfg.client.telemetry.reportUsage;
       };
-      restSection = lib.optionalAttrs cfg.client.rest.requireNoActivity {
-        rest.require_no_activity = cfg.client.rest.requireNoActivity;
+      restAttrs = cleanToml {
+        require_no_activity = cfg.client.rest.requireNoActivity;
       };
-      learningSection = lib.optionalAttrs cfg.client.learning.dataRecorder {
-        learning.data_recorder = cfg.client.learning.dataRecorder;
+      learningAttrs = cleanToml {
+        data_recorder = cfg.client.learning.dataRecorder;
       };
-      devicesSection = lib.optionalAttrs (cfg.client.devices != { }) {
-        devices = lib.mapAttrs (_: clientDeviceToToml) cfg.client.devices;
+      painAttrs = cleanToml {
+        sources = emptyAttrsToNull (lib.mapAttrs (_: painSourceToToml) cfg.client.pain.sources);
+        check = if cfg.client.pain.check == null then null else painCheckToToml cfg.client.pain.check;
       };
-      painSection = lib.optionalAttrs (cfg.client.pain.sources != { }) {
-        pain.sources = lib.mapAttrs (_: s: {
-          inherit (s) source bias;
-        }) cfg.client.pain.sources;
-      };
-      creditAttrs = filterNulls {
+      creditAttrs = cleanToml {
         limits =
           if cfg.client.credit.limits == null then null else creditLimitsToToml cfg.client.credit.limits;
         utilization =
@@ -675,7 +648,7 @@ let
           if cfg.client.credit.notifications == null then
             null
           else
-            creditNotificationsToToml cfg.client.credit.notifications;
+            notificationsToToml cfg.client.credit.notifications;
         costs = if cfg.client.credit.costs == null then null else creditCostsToToml cfg.client.credit.costs;
         rate_boost =
           if cfg.client.credit.rateBoost == null then
@@ -688,13 +661,19 @@ let
           else
             globalCreditBoostToToml cfg.client.credit.globalBoost;
       };
-      creditSection = lib.optionalAttrs (creditAttrs != { }) {
-        credit = creditAttrs;
-      };
     in
-    (pkgs.formats.toml { }).generate "openergo-client.toml" (
-      telemetrySection // restSection // learningSection // devicesSection // painSection // creditSection
-    );
+    cleanToml {
+      telemetry = emptyAttrsToNull telemetryAttrs;
+      devices = emptyAttrsToNull (lib.mapAttrs (_: clientDeviceToToml) cfg.client.devices);
+      pain = emptyAttrsToNull painAttrs;
+      credit = emptyAttrsToNull creditAttrs;
+      rest = emptyAttrsToNull restAttrs;
+      learning = emptyAttrsToNull learningAttrs;
+    };
+
+  clientConfigToml = tomlFormat.generate "openergo-client.toml" (
+    lib.recursiveUpdate clientConfigFromOptions cfg.client.settings
+  );
 in
 {
   options.services.openergo = {
@@ -709,6 +688,15 @@ in
       type = types.str;
       default = "info";
       description = "Value of the `RUST_LOG` environment variable for the server service.";
+    };
+
+    settings = mkOption {
+      type = tomlFormat.type;
+      default = { };
+      description = ''
+        Raw openergo-server TOML settings merged after the structured Nix
+        options. Values here use the Rust config file names directly.
+      '';
     };
 
     cli = {
@@ -732,6 +720,15 @@ in
         description = "Value of the `RUST_LOG` environment variable for the client service.";
       };
 
+      settings = mkOption {
+        type = tomlFormat.type;
+        default = { };
+        description = ''
+          Raw openergo-client TOML settings merged after the structured Nix
+          options. Values here use the Rust config file names directly.
+        '';
+      };
+
       users = mkOption {
         type = types.listOf types.str;
         default = [ ];
@@ -743,8 +740,8 @@ in
 
       telemetry = {
         reportUsage = mkOption {
-          type = types.bool;
-          default = false;
+          type = types.nullOr types.bool;
+          default = null;
           description = "Whether the client emits usage telemetry via OpenTelemetry.";
         };
       };
@@ -754,7 +751,7 @@ in
         default = { };
         description = ''
           Physical client integration devices. Each device owns a `controls`
-          map keyed by global control labels (must match `[A-Za-z0-9_-]+`).
+          map keyed by global control labels.
         '';
       };
 
@@ -763,26 +760,29 @@ in
           type = types.attrsOf painSourceType;
           default = { };
           description = ''
-            Logical pain signals, keyed by the user-facing pain label that
-            surfaces in telemetry and persistence. Each source's `source`
-            must reference a configured control label whose direction allows
-            input.
+            Logical pain signals keyed by the user-facing pain label that
+            surfaces in telemetry and persistence.
           '';
+        };
+        check = mkOption {
+          type = types.nullOr painCheckType;
+          default = null;
+          description = "Optional pain-check prompt configuration.";
         };
       };
 
       rest = {
         requireNoActivity = mkOption {
-          type = types.bool;
-          default = false;
+          type = types.nullOr types.bool;
+          default = null;
           description = "Whether rest requires no recent activity.";
         };
       };
 
       learning = {
         dataRecorder = mkOption {
-          type = types.bool;
-          default = false;
+          type = types.nullOr types.bool;
+          default = null;
           description = "Whether to enable the learning data recorder.";
         };
       };
@@ -799,7 +799,7 @@ in
           description = "Optional utilization output control labels.";
         };
         notifications = mkOption {
-          type = types.nullOr creditNotificationsType;
+          type = types.nullOr notificationsType;
           default = null;
           description = "Optional credit notification settings.";
         };
@@ -849,30 +849,37 @@ in
 
     devices = {
       autoDetect = mkOption {
-        type = types.bool;
-        default = true;
+        type = types.nullOr types.bool;
+        default = null;
         description = "Whether to auto-detect keyboards, mice, and touchpads.";
       };
       include = mkOption {
         type = types.attrsOf deviceMatcherType;
         default = { };
-        description = "Devices to include (in addition to auto-detected, or as the sole set if `autoDetect` is false). Keyed by a friendly label used in logs (must match `[A-Za-z0-9_-]+`).";
+        description = "Devices to include in monitoring, keyed by friendly label.";
       };
       exclude = mkOption {
         type = types.attrsOf deviceMatcherType;
         default = { };
-        description = "Devices to exclude from monitoring. Keyed by a friendly label used in logs (must match `[A-Za-z0-9_-]+`).";
+        description = "Devices to exclude from monitoring, keyed by friendly label.";
       };
     };
 
     usage = {
+      defaultPointerHand = mkOption {
+        type = types.nullOr types.str;
+        default = "right";
+        description = "Default hand used for pointer-like usage when a device has no hand setting.";
+      };
       exclude = mkOption {
         type = types.listOf types.str;
         default = [ ];
-        description = ''
-          Friendly device labels to ignore when computing usage. Each entry
-          must be a key defined under `services.openergo.devices.include`.
-        '';
+        description = "Friendly device labels to ignore when computing usage.";
+      };
+      devices = mkOption {
+        type = types.attrsOf serverUsageDeviceType;
+        default = { };
+        description = "Per-device usage classification settings, keyed by friendly label.";
       };
     };
   };
@@ -880,141 +887,15 @@ in
   config = mkIf cfg.enable {
     environment.systemPackages = [ cfg.cli.package ];
 
-    assertions =
-      matcherAssertions "include" cfg.devices.include
-      ++ matcherAssertions "exclude" cfg.devices.exclude
-      ++ map (label: {
-        assertion = isValidLabel label && cfg.devices.include ? ${label};
-        message = "services.openergo.usage.exclude entry \"${label}\" is not defined under services.openergo.devices.include";
-      }) cfg.usage.exclude
-      ++ lib.mapAttrsToList (label: device: {
-        assertion = isValidLabel label;
-        message = "services.openergo.client.devices key \"${label}\" is not a valid label (must be non-empty ASCII alphanumerics, '_' or '-')";
-      }) cfg.client.devices
-      ++ lib.mapAttrsToList (label: device: {
-        assertion =
-          device.type != "midi"
-          || ((device.port != null && device.port != "") || (device.client != null && device.client != ""));
-        message = "services.openergo.client.devices.${label} has type = \"midi\" and must set at least one of `port` or `client`";
-      }) cfg.client.devices
-      ++ lib.flatten (
-        lib.mapAttrsToList (
-          deviceLabel: device:
-          lib.mapAttrsToList (controlLabel: control: {
-            assertion = isValidLabel controlLabel;
-            message = "services.openergo.client.devices.${deviceLabel}.controls key \"${controlLabel}\" is not a valid label (must be non-empty ASCII alphanumerics, '_' or '-')";
-          }) device.controls
-        ) cfg.client.devices
-      )
-      ++ lib.mapAttrsToList (label: device: {
-        assertion = !hasDuplicates (map midiTupleKey (lib.attrValues device.controls));
-        message = "services.openergo.client.devices.${label}.controls contains duplicate MIDI (message, channel, number) tuples";
-      }) cfg.client.devices
-      ++ lib.flatten (
-        lib.mapAttrsToList (
-          deviceLabel: device:
-          lib.mapAttrsToList (controlLabel: control: {
-            assertion = control.message != "note" || control.direction == "in";
-            message = "services.openergo.client.devices.${deviceLabel}.controls.${controlLabel}: message = \"note\" requires direction = \"in\"";
-          }) device.controls
-        ) cfg.client.devices
-      )
-      ++ [
-        {
-          assertion = !hasDuplicates clientControlLabels;
-          message = "services.openergo.client.devices declares the same control label under multiple devices";
-        }
-      ]
-      ++ lib.mapAttrsToList (label: source: {
-        assertion = isValidLabel label;
-        message = "services.openergo.client.pain.sources key \"${label}\" is not a valid label (must be non-empty ASCII alphanumerics, '_' or '-')";
-      }) cfg.client.pain.sources
-      ++ lib.mapAttrsToList (label: source: {
-        assertion = controlForLabel source.source != null;
-        message = "services.openergo.client.pain.sources.${label}.source = \"${source.source}\" is not defined under services.openergo.client.devices.*.controls";
-      }) cfg.client.pain.sources
-      ++ lib.mapAttrsToList (label: source: {
-        assertion =
-          let
-            entry = controlForLabel source.source;
-          in
-          entry != null && controlAllowsIn entry.control;
-        message = "services.openergo.client.pain.sources.${label}.source = \"${source.source}\" must reference a control whose direction is `in` or `inout`";
-      }) cfg.client.pain.sources
-      ++ lib.optionals (cfg.client.credit.limits != null) [
-        (assertPositive "services.openergo.client.credit.limits.rest" cfg.client.credit.limits.rest)
-        (assertPositive "services.openergo.client.credit.limits.breaks" cfg.client.credit.limits.breaks)
-        (assertPositive "services.openergo.client.credit.limits.day" cfg.client.credit.limits.day)
-      ]
-      ++ lib.optionals (cfg.client.credit.utilization != null) (
-        lib.flatten (
-          map
-            (
-              sink:
-              lib.optionals (sink.value != null) [
-                {
-                  assertion = sink.value != "";
-                  message = "services.openergo.client.credit.utilization.${sink.name} must not be empty";
-                }
-                {
-                  assertion = controlForLabel sink.value != null;
-                  message = "services.openergo.client.credit.utilization.${sink.name} = \"${sink.value}\" is not defined under services.openergo.client.devices.*.controls";
-                }
-                {
-                  assertion =
-                    let
-                      entry = controlForLabel sink.value;
-                    in
-                    entry != null && controlAllowsOut entry.control;
-                  message = "services.openergo.client.credit.utilization.${sink.name} = \"${sink.value}\" must reference a control whose direction is `out` or `inout`";
-                }
-              ]
-            )
-            [
-              {
-                name = "restSink";
-                value = cfg.client.credit.utilization.restSink;
-              }
-              {
-                name = "breaksSink";
-                value = cfg.client.credit.utilization.breaksSink;
-              }
-              {
-                name = "daySink";
-                value = cfg.client.credit.utilization.daySink;
-              }
-            ]
-        )
-      )
-      ++ lib.optionals (cfg.client.credit.costs != null) (
-        handCostAssertions "services.openergo.client.credit.costs.hand" cfg.client.credit.costs.hand
-        ++ handCostAssertions "services.openergo.client.credit.costs.left" cfg.client.credit.costs.left
-        ++ handCostAssertions "services.openergo.client.credit.costs.right" cfg.client.credit.costs.right
-        ++ unclassifiedCostAssertions "services.openergo.client.credit.costs.unclassified" cfg.client.credit.costs.unclassified
-      )
-      ++ rateBoostAssertions "services.openergo.client.credit.rateBoost" cfg.client.credit.rateBoost
-      ++ lib.optionals (cfg.client.credit.globalBoost != null) [
-        (assertPositive "services.openergo.client.credit.globalBoost.baselineCreditPerSec" cfg.client.credit.globalBoost.baselineCreditPerSec)
-        (assertNonNegative "services.openergo.client.credit.globalBoost.factor" cfg.client.credit.globalBoost.factor)
-        (assertAtLeastOne "services.openergo.client.credit.globalBoost.cap" cfg.client.credit.globalBoost.cap)
-        (assertPositive "services.openergo.client.credit.globalBoost.smoothingSecs" cfg.client.credit.globalBoost.smoothingSecs)
-      ]
-      ++ [
-        {
-          assertion = !cfg.dwellClick.allow || config.hardware.uinput.enable;
-          message = ''
-            services.openergo.dwellClick.allow requires hardware.uinput.enable = true;
-            the uinput kernel module and group are needed for virtual device support
-          '';
-        }
-        {
-          assertion = cfg.devices.autoDetect || cfg.devices.include != { };
-          message = ''
-            services.openergo.devices.autoDetect is false and no include rules are set;
-            no devices would be monitored
-          '';
-        }
-      ];
+    assertions = [
+      {
+        assertion = !systemdDwellClickAllow || config.hardware.uinput.enable;
+        message = ''
+          services.openergo.dwellClick.allow requires hardware.uinput.enable = true;
+          the uinput kernel module and group are needed for virtual device support
+        '';
+      }
+    ];
 
     systemd.user.services.openergo-client = mkIf cfg.client.enable {
       description = "Openergo client";
@@ -1022,7 +903,7 @@ in
       after = [ "graphical-session.target" ];
 
       unitConfig = lib.optionalAttrs (cfg.client.users != [ ]) {
-        ConditionUser = map (u: "|${u}") cfg.client.users;
+        ConditionUser = map (user: "|${user}") cfg.client.users;
       };
 
       environment.RUST_LOG = cfg.client.logLevel;
@@ -1065,7 +946,7 @@ in
         SupplementaryGroups = [
           "input"
         ]
-        ++ lib.optionals cfg.dwellClick.allow [ "uinput" ];
+        ++ lib.optionals systemdDwellClickAllow [ "uinput" ];
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ProtectHome = "read-only";
