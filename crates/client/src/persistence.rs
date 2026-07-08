@@ -212,15 +212,15 @@ struct AppSnapshotRef<'a> {
 #[derive(Deserialize)]
 #[serde(tag = "schema_version", content = "data")]
 enum AppStateFileSchema {
-    #[serde(rename = "1")]
-    V1(AppSnapshotFile),
+    #[serde(rename = "2")]
+    V2(AppSnapshotFile),
 }
 
 #[derive(Serialize)]
 #[serde(tag = "schema_version", content = "data")]
 enum AppStateFileSchemaRef<'a> {
-    #[serde(rename = "1")]
-    V1(AppSnapshotRef<'a>),
+    #[serde(rename = "2")]
+    V2(AppSnapshotRef<'a>),
 }
 
 #[derive(Deserialize)]
@@ -305,7 +305,7 @@ pub async fn load(
             .attach(format!("path: {}", candidate.display()))?;
         info!("Loaded app state from {}", candidate.display());
         check_version_and_backup(candidate, &file.app_version).await?;
-        let AppStateFileSchema::V1(inner) = file.schema;
+        let AppStateFileSchema::V2(inner) = file.schema;
         let (snapshot, identity, baggage) = inner.split(labels);
         return Ok((Some(snapshot), identity, baggage));
     }
@@ -379,7 +379,7 @@ async fn check_version_and_backup(path: &Path, file_version: &str) -> Result<(),
 fn render(snapshot: AppSnapshotRef<'_>) -> Result<String, Report> {
     let file = AppStateFileRef {
         app_version: env!("CARGO_PKG_VERSION"),
-        schema: AppStateFileSchemaRef::V1(snapshot),
+        schema: AppStateFileSchemaRef::V2(snapshot),
     };
     let json = serde_json::to_string(&file).context("Failed to serialize state")?;
     Ok(json)
@@ -570,5 +570,250 @@ impl Driver {
                 return Ok(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pain::build_catalog;
+    use serde_json::{Value, json};
+    use shared::model::Credit;
+
+    fn timestamp_value(seconds: i64) -> Value {
+        serde_json::to_value(Timestamp::from_second(seconds).unwrap()).unwrap()
+    }
+
+    fn modifier_usage() -> Value {
+        json!({
+            "shift": 1_000_000_000_u64,
+            "ctrl": 2_000_000_000_u64,
+            "alt": 3_000_000_000_u64,
+            "meta": 4_000_000_000_u64,
+            "multi": 5_000_000_000_u64,
+            "same_hand_combo": 6_u64,
+        })
+    }
+
+    fn hand_usage() -> Value {
+        json!({
+            "click_count": 1_u64,
+            "drag_duration": 2_000_000_000_u64,
+            "key_count": 3_u64,
+            "scroll_count": 4_u64,
+            "modifier": modifier_usage(),
+        })
+    }
+
+    fn usage_snapshot() -> Value {
+        json!({
+            "left": hand_usage(),
+            "right": hand_usage(),
+            "unclassified_key_count": 7_u64,
+            "unclassified_key_combo": 8_u64,
+            "active_duration": 9_000_000_000_u64,
+        })
+    }
+
+    fn hand_credit() -> Value {
+        json!({
+            "click": 1.0,
+            "drag": 2.0,
+            "key": 3.0,
+            "scroll": 4.0,
+            "modifier": 5.0,
+        })
+    }
+
+    fn credit_snapshot() -> Value {
+        json!({
+            "left": hand_credit(),
+            "right": hand_credit(),
+            "unclassified_key": 6.0,
+        })
+    }
+
+    fn split_credit_snapshot() -> Value {
+        json!({
+            "base": credit_snapshot(),
+            "boost": credit_snapshot(),
+        })
+    }
+
+    fn usage_credit_state() -> Value {
+        json!({
+            "usage": usage_snapshot(),
+            "credit": split_credit_snapshot(),
+        })
+    }
+
+    fn state_data() -> Value {
+        json!({
+            "all": {
+                "usage": usage_snapshot(),
+                "credit": split_credit_snapshot(),
+                "last_activity": timestamp_value(10),
+            },
+            "day": {
+                "usage": usage_snapshot(),
+                "credit": split_credit_snapshot(),
+                "last_reset": timestamp_value(5),
+            },
+            "rest": usage_credit_state(),
+            "breaks": usage_credit_state(),
+            "pain": {},
+            "utilization": {
+                "last_published": {
+                    "rest": 0.1,
+                    "break": 0.2,
+                    "day": 0.3,
+                }
+            },
+            "activity": {
+                "total": 11_000_000_000_u64,
+            },
+            "identity": {
+                "app_state_id": "00000000-0000-0000-0000-000000000001",
+                "app_state_basis": 2_u64,
+                "app_state_generation": 3_u64,
+            }
+        })
+    }
+
+    fn state_file(schema_version: &str, data: Value) -> Value {
+        json!({
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "schema_version": schema_version,
+            "data": data,
+        })
+    }
+
+    fn empty_label_store() -> PainLabelStore {
+        PainLabelStore::new()
+    }
+
+    #[test]
+    fn v2_state_loads_handed_usage_and_compact_credit() {
+        let file: AppStateFile =
+            serde_json::from_value(state_file("2", state_data())).expect("v2 state should parse");
+        let AppStateFileSchema::V2(inner) = file.schema;
+        let labels = empty_label_store();
+
+        let (snapshot, identity, baggage) = inner.split(&labels);
+
+        assert_eq!(snapshot.all.usage().left.click_count, 1);
+        assert_eq!(snapshot.all.usage().right.modifier.same_hand_combo, 6);
+        assert_eq!(snapshot.all.usage().unclassified_key_combo, 8);
+        assert_eq!(snapshot.rest.usage().left.key_count, 3);
+        assert_eq!(snapshot.breaks.usage().right.scroll_count, 4);
+        assert_eq!(snapshot.day.usage().unclassified_key_count, 7);
+        assert_eq!(snapshot.all.credit().base.left.total(), Credit::new(15.0));
+        assert_eq!(
+            snapshot.rest.credit().base.unclassified_key,
+            Credit::new(6.0)
+        );
+        assert_eq!(
+            snapshot.breaks.credit().boost.right.modifier,
+            Credit::new(5.0)
+        );
+        assert_eq!(
+            snapshot.day.credit().boost.unclassified_key,
+            Credit::new(6.0)
+        );
+        assert_eq!(identity.app_state_basis, 2);
+        assert!(baggage.pain.orphans.is_empty());
+    }
+
+    #[test]
+    fn render_writes_v2_schema() {
+        let labels = PainLabelStore::new().finalize();
+        let catalog = build_catalog(labels, &[]);
+        let pain = PainState::default();
+        let orphans = BTreeMap::new();
+        let all = AllState::default();
+        let day = DayState::default();
+        let rest = RestState::default();
+        let breaks = BreakState::default();
+        let utilization = CreditUtilizationState::default();
+        let activity = ActivityState::default();
+        let identity = AppStateIdentity::initialize();
+
+        let json = render(AppSnapshotRef {
+            all: &all,
+            day: &day,
+            rest: &rest,
+            breaks: &breaks,
+            pain: PainStateRef {
+                state: &pain,
+                catalog: &catalog,
+                orphans: &orphans,
+            },
+            utilization: &utilization,
+            activity: &activity,
+            identity: &identity,
+        })
+        .expect("state should render");
+        let value: Value = serde_json::from_str(&json).expect("rendered json should parse");
+
+        assert_eq!(value["schema_version"], "2");
+    }
+
+    #[test]
+    fn v1_schema_is_rejected_through_schema_gate() {
+        let result: Result<AppStateFile, _> = serde_json::from_value(state_file("1", state_data()));
+
+        assert!(result.is_err(), "old v1 schema should be rejected");
+    }
+
+    #[test]
+    fn old_usage_fields_are_rejected_with_old_schema() {
+        let old_data = json!({
+            "all": {
+                "usage": {
+                    "click_count": 1_u64,
+                    "drag_duration": 0_u64,
+                    "key_count": { "left": 1_u64, "right": 0_u64, "other": 0_u64 },
+                    "scroll_count": 0_u64,
+                    "left_modifier_duration": {},
+                    "right_modifier_duration": {},
+                    "cross_combo": 0_u64,
+                    "other_combo": 0_u64,
+                    "active_duration": 0_u64,
+                },
+                "credit": {},
+                "last_activity": timestamp_value(10),
+            }
+        });
+        let result: Result<AppStateFile, _> = serde_json::from_value(state_file("1", old_data));
+
+        assert!(
+            result.is_err(),
+            "old usage field names should not be accepted through migration fallback"
+        );
+    }
+
+    #[test]
+    fn pain_orphan_baggage_survives_new_usage_shape() {
+        let mut data = state_data();
+        data["pain"] = json!({
+            "orphan": {
+                "ratio": 0.25,
+                "last_updated": serde_json::to_value(Timestamp::now()).unwrap(),
+            }
+        });
+        let file: AppStateFile =
+            serde_json::from_value(state_file("2", data)).expect("v2 state should parse");
+        let AppStateFileSchema::V2(inner) = file.schema;
+        let labels = empty_label_store();
+
+        let (snapshot, _, baggage) = inner.split(&labels);
+
+        assert!(snapshot.pain.entries.is_empty());
+        let orphan = baggage
+            .pain
+            .orphans
+            .get("orphan")
+            .expect("orphan pain should be retained as baggage");
+        assert_eq!(orphan.ratio(), 0.25);
     }
 }

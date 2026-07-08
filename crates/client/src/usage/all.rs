@@ -39,6 +39,12 @@ impl AllState {
     pub fn last_activity(&self) -> Timestamp {
         self.last_activity
     }
+
+    fn apply_increment(&mut self, increment: &UsageIncrement, credit: &CreditIncrement) {
+        self.usage += &increment.delta;
+        self.credit += credit;
+        self.last_activity = increment.end;
+    }
 }
 
 pub fn create(
@@ -61,9 +67,7 @@ impl Driver {
         usage_rx
             .recv_ref(|(increment, credit)| {
                 let _ = state_tx.update(|state| {
-                    state.usage += &increment.delta;
-                    state.credit += credit;
-                    state.last_activity = increment.end;
+                    state.apply_increment(increment, credit);
                 });
             })
             .await
@@ -71,5 +75,70 @@ impl Driver {
 
     async fn run(mut self) {
         while self.recv_activity().await.is_ok() {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credit::{Credit, CreditDelta, HandCreditDelta};
+    use jiff::Timestamp;
+    use shared::model::{HandUsageDelta, UsageDelta};
+    use std::time::Duration;
+
+    fn increment(delta: UsageDelta) -> UsageIncrement {
+        UsageIncrement::new(
+            delta,
+            Timestamp::from_second(1).unwrap(),
+            Timestamp::from_second(2).unwrap(),
+        )
+    }
+
+    fn credit() -> CreditIncrement {
+        CreditIncrement {
+            base: CreditDelta {
+                left: HandCreditDelta {
+                    key: Credit::new(2.0),
+                    ..HandCreditDelta::default()
+                },
+                unclassified_key: Credit::new(1.0),
+                ..CreditDelta::default()
+            },
+            boost: CreditDelta {
+                right: HandCreditDelta {
+                    modifier: Credit::new(3.0),
+                    ..HandCreditDelta::default()
+                },
+                ..CreditDelta::default()
+            },
+        }
+    }
+
+    #[test]
+    fn accumulates_handed_usage_and_compact_credit() {
+        let mut state = AllState::default();
+        let increment = increment(UsageDelta {
+            left: HandUsageDelta {
+                key_count: 2,
+                ..HandUsageDelta::default()
+            },
+            right: HandUsageDelta {
+                click_count: 1,
+                ..HandUsageDelta::default()
+            },
+            unclassified_key_count: 3,
+            active_duration: Duration::from_secs(1),
+            ..UsageDelta::default()
+        });
+
+        state.apply_increment(&increment, &credit());
+
+        assert_eq!(state.usage.left.key_count, 2);
+        assert_eq!(state.usage.right.click_count, 1);
+        assert_eq!(state.usage.unclassified_key_count, 3);
+        assert_eq!(state.credit.base.left.key, Credit::new(2.0));
+        assert_eq!(state.credit.base.unclassified_key, Credit::new(1.0));
+        assert_eq!(state.credit.boost.right.modifier, Credit::new(3.0));
+        assert_eq!(state.last_activity, increment.end);
     }
 }

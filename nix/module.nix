@@ -228,112 +228,82 @@ let
       multiPerSec = mkOption {
         type = types.number;
         default = 1.0;
-        description = "Additional credit cost per second while multiple same-side modifiers overlap.";
+        description = "Additional credit cost per second while multiple same-hand modifiers overlap.";
       };
     };
   };
 
-  keyCostType = types.submodule {
+  handCostType = types.submodule {
     options = {
-      left = mkOption {
-        type = types.number;
-        default = 1.0;
-        description = "Credit cost per ordinary left-hand key press.";
-      };
-      right = mkOption {
-        type = types.number;
-        default = 1.0;
-        description = "Credit cost per ordinary right-hand key press.";
-      };
-      other = mkOption {
-        type = types.number;
-        default = 1.0;
-        description = "Credit cost per ordinary key press with unknown or other hand attribution.";
-      };
-      leftCombo = mkOption {
-        type = types.number;
-        default = 1.25;
-        description = "Credit cost per same-hand left modifier combo key event.";
-      };
-      rightCombo = mkOption {
-        type = types.number;
-        default = 1.25;
-        description = "Credit cost per same-hand right modifier combo key event.";
-      };
-      crossCombo = mkOption {
-        type = types.number;
-        default = 1.10;
-        description = "Credit cost per cross-hand modifier combo key event.";
-      };
-      otherCombo = mkOption {
-        type = types.number;
-        default = 1.10;
-        description = "Credit cost per other-key modifier combo event.";
-      };
-    };
-  };
-
-  clickCostType = types.submodule {
-    options = {
-      perClick = mkOption {
+      click = mkOption {
         type = types.number;
         default = 2.0;
-        description = "Credit cost per mouse click.";
+        description = "Credit cost per click for this hand.";
       };
-    };
-  };
-
-  scrollCostType = types.submodule {
-    options = {
-      perScroll = mkOption {
-        type = types.number;
-        default = 0.25;
-        description = "Credit cost per scroll event.";
-      };
-    };
-  };
-
-  dragCostType = types.submodule {
-    options = {
-      perSec = mkOption {
+      dragPerSec = mkOption {
         type = types.number;
         default = 3.0;
-        description = "Credit cost per second while dragging.";
+        description = "Credit cost per second while dragging with this hand.";
+      };
+      key = mkOption {
+        type = types.number;
+        default = 1.0;
+        description = "Credit cost per ordinary key press for this hand.";
+      };
+      scroll = mkOption {
+        type = types.number;
+        default = 0.25;
+        description = "Credit cost per scroll event for this hand.";
+      };
+      sameHandCombo = mkOption {
+        type = types.number;
+        default = 1.25;
+        description = "Credit cost per same-hand modifier combo key event for this hand.";
+      };
+      modifier = mkOption {
+        type = modifierCostType;
+        default = { };
+        description = "Credit costs for modifier keys on this hand.";
+      };
+    };
+  };
+
+  unclassifiedCostType = types.submodule {
+    options = {
+      key = mkOption {
+        type = types.number;
+        default = 1.0;
+        description = "Credit cost per unclassified ordinary key press.";
+      };
+      combo = mkOption {
+        type = types.number;
+        default = 1.10;
+        description = "Credit cost per unclassified modifier combo key event.";
       };
     };
   };
 
   creditCostsType = types.submodule {
     options = {
-      key = mkOption {
-        type = keyCostType;
+      hand = mkOption {
+        type = handCostType;
         default = { };
-        description = "Credit costs for ordinary and modifier-combo key events.";
+        description = "Default credit costs shared by both hands.";
       };
-      click = mkOption {
-        type = clickCostType;
+      left = mkOption {
+        type = handCostType;
         default = { };
-        description = "Credit costs for mouse clicks.";
+        description = "Left-hand credit cost overrides.";
       };
-      scroll = mkOption {
-        type = scrollCostType;
+      right = mkOption {
+        type = handCostType;
         default = { };
-        description = "Credit costs for scrolling.";
+        description = "Right-hand credit cost overrides.";
       };
-      drag = mkOption {
-        type = dragCostType;
+      unclassified = mkOption {
+        type = unclassifiedCostType;
         default = { };
-        description = "Credit costs for dragging.";
-      };
-      leftModifier = mkOption {
-        type = modifierCostType;
-        default = { };
-        description = "Credit costs for left-side modifier keys.";
-      };
-      rightModifier = mkOption {
-        type = modifierCostType;
-        default = { };
-        description = "Credit costs for right-side modifier keys.";
+        description = "Credit costs for key events that cannot be assigned to a hand.";
       };
     };
   };
@@ -409,15 +379,10 @@ let
         default = null;
         description = "Rate boost settings for dragging.";
       };
-      leftModifier = mkOption {
+      modifier = mkOption {
         type = types.nullOr partialRateBoostType;
         default = null;
-        description = "Rate boost settings for left-side modifiers.";
-      };
-      rightModifier = mkOption {
-        type = types.nullOr partialRateBoostType;
-        default = null;
-        description = "Rate boost settings for right-side modifiers.";
+        description = "Rate boost settings for modifier duration.";
       };
     };
   };
@@ -498,6 +463,22 @@ let
     (assertNonNegative "${prefix}.multiPerSec" costs.multiPerSec)
   ];
 
+  handCostAssertions =
+    prefix: costs:
+    [
+      (assertNonNegative "${prefix}.click" costs.click)
+      (assertNonNegative "${prefix}.dragPerSec" costs.dragPerSec)
+      (assertNonNegative "${prefix}.key" costs.key)
+      (assertNonNegative "${prefix}.scroll" costs.scroll)
+      (assertNonNegative "${prefix}.sameHandCombo" costs.sameHandCombo)
+    ]
+    ++ modifierCostAssertions "${prefix}.modifier" costs.modifier;
+
+  unclassifiedCostAssertions = prefix: costs: [
+    (assertNonNegative "${prefix}.key" costs.key)
+    (assertNonNegative "${prefix}.combo" costs.combo)
+  ];
+
   partialRateBoostAssertions =
     prefix: boost:
     lib.optionals (boost != null) (
@@ -519,8 +500,7 @@ let
       ++ partialRateBoostAssertions "${prefix}.click" boost.click
       ++ partialRateBoostAssertions "${prefix}.scroll" boost.scroll
       ++ partialRateBoostAssertions "${prefix}.drag" boost.drag
-      ++ partialRateBoostAssertions "${prefix}.leftModifier" boost.leftModifier
-      ++ partialRateBoostAssertions "${prefix}.rightModifier" boost.rightModifier
+      ++ partialRateBoostAssertions "${prefix}.modifier" boost.modifier
     );
 
   matcherAssertions =
@@ -620,33 +600,22 @@ let
     multi_per_sec = costs.multiPerSec;
   };
 
-  keyCostsToToml = costs: {
-    inherit (costs) left right other;
-    left_combo = costs.leftCombo;
-    right_combo = costs.rightCombo;
-    cross_combo = costs.crossCombo;
-    other_combo = costs.otherCombo;
+  handCostsToToml = costs: {
+    inherit (costs) click key scroll;
+    drag_per_sec = costs.dragPerSec;
+    same_hand_combo = costs.sameHandCombo;
+    modifier = modifierCostsToToml costs.modifier;
   };
 
-  clickCostsToToml = costs: {
-    per_click = costs.perClick;
-  };
-
-  scrollCostsToToml = costs: {
-    per_scroll = costs.perScroll;
-  };
-
-  dragCostsToToml = costs: {
-    per_sec = costs.perSec;
+  unclassifiedCostsToToml = costs: {
+    inherit (costs) key combo;
   };
 
   creditCostsToToml = costs: {
-    key = keyCostsToToml costs.key;
-    click = clickCostsToToml costs.click;
-    scroll = scrollCostsToToml costs.scroll;
-    drag = dragCostsToToml costs.drag;
-    left_modifier = modifierCostsToToml costs.leftModifier;
-    right_modifier = modifierCostsToToml costs.rightModifier;
+    hand = handCostsToToml costs.hand;
+    left = handCostsToToml costs.left;
+    right = handCostsToToml costs.right;
+    unclassified = unclassifiedCostsToToml costs.unclassified;
   };
 
   partialRateBoostToToml =
@@ -666,10 +635,7 @@ let
       click = if boost.click == null then null else partialRateBoostToToml boost.click;
       scroll = if boost.scroll == null then null else partialRateBoostToToml boost.scroll;
       drag = if boost.drag == null then null else partialRateBoostToToml boost.drag;
-      left_modifier =
-        if boost.leftModifier == null then null else partialRateBoostToToml boost.leftModifier;
-      right_modifier =
-        if boost.rightModifier == null then null else partialRateBoostToToml boost.rightModifier;
+      modifier = if boost.modifier == null then null else partialRateBoostToToml boost.modifier;
     };
 
   globalCreditBoostToToml = boost: {
@@ -1021,20 +987,10 @@ in
         )
       )
       ++ lib.optionals (cfg.client.credit.costs != null) (
-        [
-          (assertNonNegative "services.openergo.client.credit.costs.key.left" cfg.client.credit.costs.key.left)
-          (assertNonNegative "services.openergo.client.credit.costs.key.right" cfg.client.credit.costs.key.right)
-          (assertNonNegative "services.openergo.client.credit.costs.key.other" cfg.client.credit.costs.key.other)
-          (assertNonNegative "services.openergo.client.credit.costs.key.leftCombo" cfg.client.credit.costs.key.leftCombo)
-          (assertNonNegative "services.openergo.client.credit.costs.key.rightCombo" cfg.client.credit.costs.key.rightCombo)
-          (assertNonNegative "services.openergo.client.credit.costs.key.crossCombo" cfg.client.credit.costs.key.crossCombo)
-          (assertNonNegative "services.openergo.client.credit.costs.key.otherCombo" cfg.client.credit.costs.key.otherCombo)
-          (assertNonNegative "services.openergo.client.credit.costs.click.perClick" cfg.client.credit.costs.click.perClick)
-          (assertNonNegative "services.openergo.client.credit.costs.scroll.perScroll" cfg.client.credit.costs.scroll.perScroll)
-          (assertNonNegative "services.openergo.client.credit.costs.drag.perSec" cfg.client.credit.costs.drag.perSec)
-        ]
-        ++ modifierCostAssertions "services.openergo.client.credit.costs.leftModifier" cfg.client.credit.costs.leftModifier
-        ++ modifierCostAssertions "services.openergo.client.credit.costs.rightModifier" cfg.client.credit.costs.rightModifier
+        handCostAssertions "services.openergo.client.credit.costs.hand" cfg.client.credit.costs.hand
+        ++ handCostAssertions "services.openergo.client.credit.costs.left" cfg.client.credit.costs.left
+        ++ handCostAssertions "services.openergo.client.credit.costs.right" cfg.client.credit.costs.right
+        ++ unclassifiedCostAssertions "services.openergo.client.credit.costs.unclassified" cfg.client.credit.costs.unclassified
       )
       ++ rateBoostAssertions "services.openergo.client.credit.rateBoost" cfg.client.credit.rateBoost
       ++ lib.optionals (cfg.client.credit.globalBoost != null) [

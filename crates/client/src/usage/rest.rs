@@ -25,8 +25,18 @@ pub struct RestState {
 }
 
 impl RestState {
+    #[cfg(test)]
+    pub fn usage(&self) -> &UsageSnapshot {
+        &self.usage
+    }
+
     pub fn credit(&self) -> &SplitCreditSnapshot {
         &self.credit
+    }
+
+    fn apply_increment(&mut self, increment: &UsageIncrement, credit: &CreditIncrement) {
+        self.usage += &increment.delta;
+        self.credit += credit;
     }
 }
 
@@ -68,8 +78,7 @@ impl Driver {
         usage_rx
             .recv_ref(|(increment, credit)| {
                 let _ = state_tx.update(|state| {
-                    state.usage += &increment.delta;
-                    state.credit += credit;
+                    state.apply_increment(increment, credit);
                 });
             })
             .await
@@ -157,5 +166,52 @@ impl Driver {
             }
             deadline = BootInstant::now() + REST_TIMEOUT;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credit::{Credit, CreditDelta, HandCreditDelta};
+    use jiff::Timestamp;
+    use shared::model::{HandUsageDelta, UsageDelta};
+
+    fn increment(delta: UsageDelta) -> UsageIncrement {
+        UsageIncrement::new(
+            delta,
+            Timestamp::from_second(1).unwrap(),
+            Timestamp::from_second(2).unwrap(),
+        )
+    }
+
+    #[test]
+    fn accumulates_handed_usage_and_compact_credit() {
+        let mut state = RestState::default();
+        let increment = increment(UsageDelta {
+            left: HandUsageDelta {
+                scroll_count: 4,
+                ..HandUsageDelta::default()
+            },
+            unclassified_key_combo: 2,
+            ..UsageDelta::default()
+        });
+        let credit = CreditIncrement {
+            base: CreditDelta {
+                left: HandCreditDelta {
+                    scroll: Credit::new(1.0),
+                    ..HandCreditDelta::default()
+                },
+                unclassified_key: Credit::new(2.0),
+                ..CreditDelta::default()
+            },
+            boost: CreditDelta::default(),
+        };
+
+        state.apply_increment(&increment, &credit);
+
+        assert_eq!(state.usage().left.scroll_count, 4);
+        assert_eq!(state.usage().unclassified_key_combo, 2);
+        assert_eq!(state.credit().base.left.scroll, Credit::new(1.0));
+        assert_eq!(state.credit().base.unclassified_key, Credit::new(2.0));
     }
 }

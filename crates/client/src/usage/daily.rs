@@ -36,8 +36,18 @@ impl Default for DayState {
 }
 
 impl DayState {
+    #[cfg(test)]
+    pub fn usage(&self) -> &UsageSnapshot {
+        &self.usage
+    }
+
     pub fn credit(&self) -> &SplitCreditSnapshot {
         &self.credit
+    }
+
+    fn apply_increment(&mut self, increment: &UsageIncrement, credit: &CreditIncrement) {
+        self.usage += &increment.delta;
+        self.credit += credit;
     }
 }
 
@@ -65,8 +75,7 @@ async fn accumulate(
     while usage_rx
         .recv_ref(|(increment, credit)| {
             let _ = state_tx.update(|state| {
-                state.usage += &increment.delta;
-                state.credit += credit;
+                state.apply_increment(increment, credit);
             });
         })
         .await
@@ -132,6 +141,59 @@ async fn run(
                 return Ok(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credit::{Credit, CreditDelta, HandCreditDelta};
+    use shared::model::{HandUsageDelta, UsageDelta};
+    use std::time::Duration;
+
+    fn increment(delta: UsageDelta) -> UsageIncrement {
+        UsageIncrement::new(
+            delta,
+            Timestamp::from_second(1).unwrap(),
+            Timestamp::from_second(2).unwrap(),
+        )
+    }
+
+    #[test]
+    fn accumulates_handed_usage_and_compact_credit() {
+        let mut state = DayState::default();
+        let increment = increment(UsageDelta {
+            left: HandUsageDelta {
+                drag_duration: Duration::from_secs(2),
+                ..HandUsageDelta::default()
+            },
+            right: HandUsageDelta {
+                key_count: 5,
+                ..HandUsageDelta::default()
+            },
+            ..UsageDelta::default()
+        });
+        let credit = CreditIncrement {
+            base: CreditDelta {
+                left: HandCreditDelta {
+                    drag: Credit::new(6.0),
+                    ..HandCreditDelta::default()
+                },
+                right: HandCreditDelta {
+                    key: Credit::new(5.0),
+                    ..HandCreditDelta::default()
+                },
+                ..CreditDelta::default()
+            },
+            boost: CreditDelta::default(),
+        };
+
+        state.apply_increment(&increment, &credit);
+
+        assert_eq!(state.usage().left.drag_duration, Duration::from_secs(2));
+        assert_eq!(state.usage().right.key_count, 5);
+        assert_eq!(state.credit().base.left.drag, Credit::new(6.0));
+        assert_eq!(state.credit().base.right.key, Credit::new(5.0));
     }
 }
 

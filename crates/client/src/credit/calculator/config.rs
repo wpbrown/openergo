@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer};
 
 #[derive(Debug, Clone)]
 pub struct CreditCalculatorConfig {
-    pub costs: CreditCostConfig,
+    pub costs: ResolvedCreditCosts,
     pub rate_boost: CreditRateBoostConfig,
     pub global_boost: GlobalCreditBoostConfig,
 }
@@ -15,7 +15,7 @@ impl CreditCalculatorConfig {
         global_boost: Option<GlobalCreditBoostConfig>,
     ) -> Self {
         Self {
-            costs: costs.unwrap_or_default(),
+            costs: costs.unwrap_or_default().resolve(),
             rate_boost: rate_boost.unwrap_or_default(),
             global_boost: global_boost.unwrap_or_default(),
         }
@@ -39,146 +39,179 @@ impl Default for CreditCalculatorConfig {
 #[serde(deny_unknown_fields)]
 pub struct CreditCostConfig {
     #[serde(default)]
-    pub key: KeyCostConfig,
+    pub hand: PartialHandCostConfig,
     #[serde(default)]
-    pub click: ClickCostConfig,
+    pub left: PartialHandCostConfig,
     #[serde(default)]
-    pub scroll: ScrollCostConfig,
+    pub right: PartialHandCostConfig,
     #[serde(default)]
-    pub drag: DragCostConfig,
-    #[serde(default)]
-    pub left_modifier: ModifierCostConfig,
-    #[serde(default)]
-    pub right_modifier: ModifierCostConfig,
+    pub unclassified: UnclassifiedCostConfig,
 }
 
 impl CreditCostConfig {
+    fn resolve(&self) -> ResolvedCreditCosts {
+        let mut hand = HandCostConfig::default();
+        self.hand.apply_to(&mut hand);
+
+        let mut left = hand.clone();
+        self.left.apply_to(&mut left);
+
+        let mut right = hand;
+        self.right.apply_to(&mut right);
+
+        ResolvedCreditCosts {
+            left,
+            right,
+            unclassified: self.unclassified.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedCreditCosts {
+    pub left: HandCostConfig,
+    pub right: HandCostConfig,
+    pub unclassified: UnclassifiedCostConfig,
+}
+
+impl ResolvedCreditCosts {
     fn validate(&self) -> Result<(), Report> {
-        self.key.validate("credit.costs.key")?;
-        self.click.validate("credit.costs.click")?;
-        self.scroll.validate("credit.costs.scroll")?;
-        self.drag.validate("credit.costs.drag")?;
-        self.left_modifier.validate("credit.costs.left_modifier")?;
-        self.right_modifier
-            .validate("credit.costs.right_modifier")?;
+        self.left.validate("credit.costs.left")?;
+        self.right.validate("credit.costs.right")?;
+        self.unclassified.validate("credit.costs.unclassified")?;
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct KeyCostConfig {
-    #[serde(default = "default_key_cost")]
-    pub left: f64,
-    #[serde(default = "default_key_cost")]
-    pub right: f64,
-    #[serde(default = "default_key_cost")]
-    pub other: f64,
-    #[serde(default = "default_same_hand_combo_cost")]
-    pub left_combo: f64,
-    #[serde(default = "default_same_hand_combo_cost")]
-    pub right_combo: f64,
-    #[serde(default = "default_other_hand_combo_cost")]
-    pub cross_combo: f64,
-    #[serde(default = "default_other_hand_combo_cost")]
-    pub other_combo: f64,
+pub struct PartialHandCostConfig {
+    pub click: Option<f64>,
+    pub drag_per_sec: Option<f64>,
+    pub key: Option<f64>,
+    pub scroll: Option<f64>,
+    pub same_hand_combo: Option<f64>,
+    #[serde(default)]
+    pub modifier: PartialModifierCostConfig,
 }
 
-impl KeyCostConfig {
+impl PartialHandCostConfig {
+    fn apply_to(&self, costs: &mut HandCostConfig) {
+        if let Some(click) = self.click {
+            costs.click = click;
+        }
+        if let Some(drag_per_sec) = self.drag_per_sec {
+            costs.drag_per_sec = drag_per_sec;
+        }
+        if let Some(key) = self.key {
+            costs.key = key;
+        }
+        if let Some(scroll) = self.scroll {
+            costs.scroll = scroll;
+        }
+        if let Some(same_hand_combo) = self.same_hand_combo {
+            costs.same_hand_combo = same_hand_combo;
+        }
+        self.modifier.apply_to(&mut costs.modifier);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HandCostConfig {
+    pub click: f64,
+    pub drag_per_sec: f64,
+    pub key: f64,
+    pub scroll: f64,
+    pub same_hand_combo: f64,
+    pub modifier: ModifierCostConfig,
+}
+
+impl HandCostConfig {
     fn validate(&self, prefix: &str) -> Result<(), Report> {
         for (field, value) in [
-            ("left", self.left),
-            ("right", self.right),
-            ("other", self.other),
-            ("left_combo", self.left_combo),
-            ("right_combo", self.right_combo),
-            ("cross_combo", self.cross_combo),
-            ("other_combo", self.other_combo),
+            ("click", self.click),
+            ("drag_per_sec", self.drag_per_sec),
+            ("key", self.key),
+            ("scroll", self.scroll),
+            ("same_hand_combo", self.same_hand_combo),
         ] {
             validate_non_negative_finite(&format!("{prefix}.{field}"), value)?;
         }
+        self.modifier.validate(&format!("{prefix}.modifier"))?;
         Ok(())
     }
 }
 
-impl Default for KeyCostConfig {
+impl Default for HandCostConfig {
     fn default() -> Self {
         Self {
-            left: default_key_cost(),
-            right: default_key_cost(),
-            other: default_key_cost(),
-            left_combo: default_same_hand_combo_cost(),
-            right_combo: default_same_hand_combo_cost(),
-            cross_combo: default_other_hand_combo_cost(),
-            other_combo: default_other_hand_combo_cost(),
+            click: default_click_cost(),
+            drag_per_sec: default_drag_cost(),
+            key: default_key_cost(),
+            scroll: default_scroll_cost(),
+            same_hand_combo: default_same_hand_combo_cost(),
+            modifier: ModifierCostConfig::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClickCostConfig {
-    #[serde(default = "default_click_cost")]
-    pub per_click: f64,
+pub struct UnclassifiedCostConfig {
+    #[serde(default = "default_key_cost")]
+    pub key: f64,
+    #[serde(default = "default_unclassified_combo_cost")]
+    pub combo: f64,
 }
 
-impl ClickCostConfig {
+impl UnclassifiedCostConfig {
     fn validate(&self, prefix: &str) -> Result<(), Report> {
-        validate_non_negative_finite(&format!("{prefix}.per_click"), self.per_click)
+        validate_non_negative_finite(&format!("{prefix}.key"), self.key)?;
+        validate_non_negative_finite(&format!("{prefix}.combo"), self.combo)?;
+        Ok(())
     }
 }
 
-impl Default for ClickCostConfig {
+impl Default for UnclassifiedCostConfig {
     fn default() -> Self {
         Self {
-            per_click: default_click_cost(),
+            key: default_key_cost(),
+            combo: default_unclassified_combo_cost(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ScrollCostConfig {
-    #[serde(default = "default_scroll_cost")]
-    pub per_scroll: f64,
+pub struct PartialModifierCostConfig {
+    pub shift_per_sec: Option<f64>,
+    pub ctrl_per_sec: Option<f64>,
+    pub alt_per_sec: Option<f64>,
+    pub meta_per_sec: Option<f64>,
+    pub multi_per_sec: Option<f64>,
 }
 
-impl ScrollCostConfig {
-    fn validate(&self, prefix: &str) -> Result<(), Report> {
-        validate_non_negative_finite(&format!("{prefix}.per_scroll"), self.per_scroll)
-    }
-}
-
-impl Default for ScrollCostConfig {
-    fn default() -> Self {
-        Self {
-            per_scroll: default_scroll_cost(),
+impl PartialModifierCostConfig {
+    fn apply_to(&self, costs: &mut ModifierCostConfig) {
+        if let Some(shift_per_sec) = self.shift_per_sec {
+            costs.shift_per_sec = shift_per_sec;
+        }
+        if let Some(ctrl_per_sec) = self.ctrl_per_sec {
+            costs.ctrl_per_sec = ctrl_per_sec;
+        }
+        if let Some(alt_per_sec) = self.alt_per_sec {
+            costs.alt_per_sec = alt_per_sec;
+        }
+        if let Some(meta_per_sec) = self.meta_per_sec {
+            costs.meta_per_sec = meta_per_sec;
+        }
+        if let Some(multi_per_sec) = self.multi_per_sec {
+            costs.multi_per_sec = multi_per_sec;
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DragCostConfig {
-    #[serde(default = "default_drag_cost")]
-    pub per_sec: f64,
-}
-
-impl DragCostConfig {
-    fn validate(&self, prefix: &str) -> Result<(), Report> {
-        validate_non_negative_finite(&format!("{prefix}.per_sec"), self.per_sec)
-    }
-}
-
-impl Default for DragCostConfig {
-    fn default() -> Self {
-        Self {
-            per_sec: default_drag_cost(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModifierCostConfig {
     #[serde(default = "default_shift_cost")]
@@ -227,20 +260,18 @@ pub struct CreditRateBoostConfig {
     pub click: RateBoostConfig,
     pub scroll: RateBoostConfig,
     pub drag: RateBoostConfig,
-    pub left_modifier: RateBoostConfig,
-    pub right_modifier: RateBoostConfig,
+    pub modifier: RateBoostConfig,
 }
 
 impl CreditRateBoostConfig {
     fn validate(&self) -> Result<(), Report> {
         self.defaults.validate("credit.rate_boost")?;
         for (field, config) in [
-            ("credit.rate_boost.key", self.key),
-            ("credit.rate_boost.click", self.click),
-            ("credit.rate_boost.scroll", self.scroll),
-            ("credit.rate_boost.drag", self.drag),
-            ("credit.rate_boost.left_modifier", self.left_modifier),
-            ("credit.rate_boost.right_modifier", self.right_modifier),
+            ("credit.rate_boost.key", &self.key),
+            ("credit.rate_boost.click", &self.click),
+            ("credit.rate_boost.scroll", &self.scroll),
+            ("credit.rate_boost.drag", &self.drag),
+            ("credit.rate_boost.modifier", &self.modifier),
         ] {
             config.validate(field)?;
         }
@@ -281,8 +312,7 @@ struct RawCreditRateBoostConfig {
     click: Option<PartialRateBoostConfig>,
     scroll: Option<PartialRateBoostConfig>,
     drag: Option<PartialRateBoostConfig>,
-    left_modifier: Option<PartialRateBoostConfig>,
-    right_modifier: Option<PartialRateBoostConfig>,
+    modifier: Option<PartialRateBoostConfig>,
 }
 
 impl RawCreditRateBoostConfig {
@@ -298,8 +328,7 @@ impl RawCreditRateBoostConfig {
             click: self.click,
             scroll: self.scroll,
             drag: self.drag,
-            left_modifier: self.left_modifier,
-            right_modifier: self.right_modifier,
+            modifier: self.modifier,
         };
         (defaults, children)
     }
@@ -311,45 +340,39 @@ struct RawRateBoostChildren {
     click: Option<PartialRateBoostConfig>,
     scroll: Option<PartialRateBoostConfig>,
     drag: Option<PartialRateBoostConfig>,
-    left_modifier: Option<PartialRateBoostConfig>,
-    right_modifier: Option<PartialRateBoostConfig>,
+    modifier: Option<PartialRateBoostConfig>,
 }
 
 impl CreditRateBoostConfig {
     fn from_raw(defaults: RateBoostDefaults, children: RawRateBoostChildren) -> Self {
         Self {
-            defaults,
-            key: RateBoostConfig::resolve(defaults, children.key, default_key_baseline_per_sec()),
+            key: RateBoostConfig::resolve(&defaults, children.key, default_key_baseline_per_sec()),
             click: RateBoostConfig::resolve(
-                defaults,
+                &defaults,
                 children.click,
                 default_click_baseline_per_sec(),
             ),
             scroll: RateBoostConfig::resolve(
-                defaults,
+                &defaults,
                 children.scroll,
                 default_scroll_baseline_per_sec(),
             ),
             drag: RateBoostConfig::resolve(
-                defaults,
+                &defaults,
                 children.drag,
                 default_drag_baseline_per_sec(),
             ),
-            left_modifier: RateBoostConfig::resolve(
-                defaults,
-                children.left_modifier,
+            modifier: RateBoostConfig::resolve(
+                &defaults,
+                children.modifier,
                 default_modifier_baseline_per_sec(),
             ),
-            right_modifier: RateBoostConfig::resolve(
-                defaults,
-                children.right_modifier,
-                default_modifier_baseline_per_sec(),
-            ),
+            defaults,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartialRateBoostConfig {
     pub baseline_per_sec: f64,
@@ -359,7 +382,7 @@ pub struct PartialRateBoostConfig {
     pub smoothing_secs: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RateBoostDefaults {
     #[serde(default = "default_rate_enabled")]
@@ -392,7 +415,7 @@ impl Default for RateBoostDefaults {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RateBoostConfig {
     pub enabled: bool,
     pub baseline_per_sec: f64,
@@ -403,7 +426,7 @@ pub struct RateBoostConfig {
 
 impl RateBoostConfig {
     fn resolve(
-        defaults: RateBoostDefaults,
+        defaults: &RateBoostDefaults,
         partial: Option<PartialRateBoostConfig>,
         default_baseline: f64,
     ) -> Self {
@@ -434,7 +457,7 @@ impl RateBoostConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalCreditBoostConfig {
     #[serde(default)]
@@ -506,7 +529,7 @@ fn default_same_hand_combo_cost() -> f64 {
     1.25
 }
 
-fn default_other_hand_combo_cost() -> f64 {
+fn default_unclassified_combo_cost() -> f64 {
     1.10
 }
 
@@ -606,6 +629,89 @@ mod tests {
     }
 
     #[test]
+    fn cost_config_resolves_hand_defaults_and_overrides() {
+        let config: CreditCostConfig = toml::from_str(
+            r#"
+            [hand]
+            key = 1.5
+            same_hand_combo = 2.5
+
+            [hand.modifier]
+            shift_per_sec = 6.0
+
+            [left]
+            key = 1.1
+
+            [left.modifier]
+            ctrl_per_sec = 7.0
+
+            [right]
+            scroll = 0.30
+
+            [unclassified]
+            key = 2.0
+            combo = 3.0
+            "#,
+        )
+        .expect("cost config should parse");
+
+        let resolved = config.resolve();
+        resolved.validate().expect("resolved costs should validate");
+        assert_close(resolved.left.key, 1.1);
+        assert_close(resolved.right.key, 1.5);
+        assert_close(resolved.left.same_hand_combo, 2.5);
+        assert_close(resolved.right.scroll, 0.30);
+        assert_close(resolved.left.modifier.shift_per_sec, 6.0);
+        assert_close(resolved.right.modifier.shift_per_sec, 6.0);
+        assert_close(resolved.left.modifier.ctrl_per_sec, 7.0);
+        assert_close(resolved.right.modifier.ctrl_per_sec, 5.0);
+        assert_close(resolved.unclassified.key, 2.0);
+        assert_close(resolved.unclassified.combo, 3.0);
+    }
+
+    #[test]
+    fn old_cost_sections_are_rejected() {
+        let old_key: Result<CreditCostConfig, _> = toml::from_str(
+            r#"
+            [key]
+            left = 1.0
+            "#,
+        );
+        assert!(old_key.is_err(), "old key cost section should be rejected");
+
+        let old_modifier: Result<CreditCostConfig, _> = toml::from_str(
+            r#"
+            [left_modifier]
+            shift_per_sec = 5.0
+            "#,
+        );
+        assert!(
+            old_modifier.is_err(),
+            "old modifier cost section should be rejected"
+        );
+    }
+
+    #[test]
+    fn invalid_resolved_cost_reports_field_path() {
+        let costs: CreditCostConfig = toml::from_str(
+            r#"
+            [left]
+            key = -1.0
+            "#,
+        )
+        .expect("cost config should parse");
+        let config = CreditCalculatorConfig::from_parts(Some(costs), None, None);
+
+        let err = config
+            .validate()
+            .expect_err("negative cost should fail validation");
+        assert!(
+            err.to_string().contains("credit.costs.left.key"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn rate_boost_child_inherits_parent_defaults() {
         let config: CreditRateBoostConfig = toml::from_str(
             r#"
@@ -628,6 +734,43 @@ mod tests {
         assert_close(config.click.baseline_per_sec, 0.75);
         assert_close(config.click.factor, 0.5);
         assert_close(config.click.smoothing_secs, 4.0);
+    }
+
+    #[test]
+    fn modifier_rate_boost_child_inherits_parent_defaults() {
+        let config: CreditRateBoostConfig = toml::from_str(
+            r#"
+            enabled = false
+            factor = 0.5
+            cap = 2.5
+            smoothing_secs = 4.0
+
+            [modifier]
+            baseline_per_sec = 0.9
+            "#,
+        )
+        .expect("rate boost config should parse");
+
+        assert!(!config.modifier.enabled);
+        assert_close(config.modifier.baseline_per_sec, 0.9);
+        assert_close(config.modifier.factor, 0.5);
+        assert_close(config.modifier.cap, 2.5);
+        assert_close(config.modifier.smoothing_secs, 4.0);
+    }
+
+    #[test]
+    fn old_modifier_rate_boost_children_are_rejected() {
+        let result: Result<CreditRateBoostConfig, _> = toml::from_str(
+            r#"
+            [left_modifier]
+            baseline_per_sec = 0.3
+            "#,
+        );
+
+        assert!(
+            result.is_err(),
+            "old modifier rate boost child should be rejected"
+        );
     }
 
     #[test]

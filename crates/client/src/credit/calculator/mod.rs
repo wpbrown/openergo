@@ -1,9 +1,9 @@
 use self::config::{
-    CreditCalculatorConfig, CreditCostConfig, CreditRateBoostConfig, GlobalCreditBoostConfig,
-    ModifierCostConfig, RateBoostConfig,
+    CreditCalculatorConfig, CreditRateBoostConfig, GlobalCreditBoostConfig, HandCostConfig,
+    ModifierCostConfig, RateBoostConfig, ResolvedCreditCosts,
 };
-use crate::credit::{CreditDelta, CreditIncrement, KeyCreditDelta, ModifierCreditDelta};
-use shared::model::{Credit, ModifierUsageDelta};
+use crate::credit::{CreditDelta, CreditIncrement, HandCreditDelta};
+use shared::model::{Credit, HandUsageDelta, ModifierUsageDelta};
 use shared::protocol::server::UsageIncrement;
 
 pub mod config;
@@ -17,12 +17,14 @@ pub struct CreditCalculator {
 
 impl CreditCalculator {
     pub fn new(config: CreditCalculatorConfig) -> Self {
+        let global_rate = config
+            .global_boost
+            .enabled
+            .then(|| GlobalBoostTracker::new(config.global_boost.clone()));
+
         Self {
             local_rates: LocalRateTrackers::new(&config.rate_boost),
-            global_rate: config
-                .global_boost
-                .enabled
-                .then(|| GlobalBoostTracker::new(config.global_boost)),
+            global_rate,
             config,
         }
     }
@@ -34,7 +36,7 @@ impl CreditCalculator {
         let dt = delta.active_duration.as_secs_f64();
         if dt <= 0.0 {
             return CreditIncrement {
-                base,
+                base: base.compact(),
                 boost: CreditDelta::default(),
             };
         }
@@ -43,24 +45,22 @@ impl CreditCalculator {
             .local_rates
             .key
             .boost_fraction(delta.key_event_count() as f64 / dt, dt);
-        let click_boost_fraction = self
-            .local_rates
-            .click
-            .boost_fraction(delta.click_count as f64 / dt, dt);
-        let scroll_boost_fraction = self
-            .local_rates
-            .scroll
-            .boost_fraction(delta.scroll_count as f64 / dt, dt);
-        let drag_boost_fraction = self
-            .local_rates
-            .drag
-            .boost_fraction(delta.drag_duration.as_secs_f64() / dt, dt);
-        let left_modifier_boost_fraction = self.local_rates.left_modifier.boost_fraction(
-            modifier_duration_secs(&delta.left_modifier_duration) / dt,
+        let click_boost_fraction = self.local_rates.click.boost_fraction(
+            (delta.left.click_count + delta.right.click_count) as f64 / dt,
             dt,
         );
-        let right_modifier_boost_fraction = self.local_rates.right_modifier.boost_fraction(
-            modifier_duration_secs(&delta.right_modifier_duration) / dt,
+        let scroll_boost_fraction = self.local_rates.scroll.boost_fraction(
+            (delta.left.scroll_count + delta.right.scroll_count) as f64 / dt,
+            dt,
+        );
+        let drag_boost_fraction = self.local_rates.drag.boost_fraction(
+            (delta.left.drag_duration.as_secs_f64() + delta.right.drag_duration.as_secs_f64()) / dt,
+            dt,
+        );
+        let modifier_boost_fraction = self.local_rates.modifier.boost_fraction(
+            (modifier_duration_secs(&delta.left.modifier)
+                + modifier_duration_secs(&delta.right.modifier))
+                / dt,
             dt,
         );
         let global_boost_fraction = self
@@ -69,19 +69,18 @@ impl CreditCalculator {
             .map(|global_rate| global_rate.boost_fraction(base.total().as_f64() / dt, dt))
             .unwrap_or(0.0);
 
-        let boost = CreditDelta {
-            key: base.key.scaled(key_boost_fraction + global_boost_fraction),
-            click: base.click * (click_boost_fraction + global_boost_fraction),
-            scroll: base.scroll * (scroll_boost_fraction + global_boost_fraction),
-            drag: base.drag * (drag_boost_fraction + global_boost_fraction),
-            left_modifier: base
-                .left_modifier
-                .scaled(left_modifier_boost_fraction + global_boost_fraction),
-            right_modifier: base
-                .right_modifier
-                .scaled(right_modifier_boost_fraction + global_boost_fraction),
-        };
-        CreditIncrement { base, boost }
+        let boost = base.boosted(
+            key_boost_fraction,
+            click_boost_fraction,
+            scroll_boost_fraction,
+            drag_boost_fraction,
+            modifier_boost_fraction,
+            global_boost_fraction,
+        );
+        CreditIncrement {
+            base: base.compact(),
+            boost,
+        }
     }
 }
 
@@ -97,19 +96,17 @@ struct LocalRateTrackers {
     click: RateBoostTracker,
     scroll: RateBoostTracker,
     drag: RateBoostTracker,
-    left_modifier: RateBoostTracker,
-    right_modifier: RateBoostTracker,
+    modifier: RateBoostTracker,
 }
 
 impl LocalRateTrackers {
     fn new(config: &CreditRateBoostConfig) -> Self {
         Self {
-            key: RateBoostTracker::new(config.key),
-            click: RateBoostTracker::new(config.click),
-            scroll: RateBoostTracker::new(config.scroll),
-            drag: RateBoostTracker::new(config.drag),
-            left_modifier: RateBoostTracker::new(config.left_modifier),
-            right_modifier: RateBoostTracker::new(config.right_modifier),
+            key: RateBoostTracker::new(config.key.clone()),
+            click: RateBoostTracker::new(config.click.clone()),
+            scroll: RateBoostTracker::new(config.scroll.clone()),
+            drag: RateBoostTracker::new(config.drag.clone()),
+            modifier: RateBoostTracker::new(config.modifier.clone()),
         }
     }
 }
@@ -189,38 +186,159 @@ fn boost_fraction(rate: f64, baseline: f64, factor: f64, cap: f64) -> f64 {
     (over_baseline * factor).min(cap - 1.0)
 }
 
-fn base_credit(increment: &UsageIncrement, costs: &CreditCostConfig) -> CreditDelta {
+#[derive(Debug, Clone, Copy, Default)]
+struct ExpandedCreditDelta {
+    left: ExpandedHandCreditDelta,
+    right: ExpandedHandCreditDelta,
+    unclassified_key: Credit,
+    unclassified_combo: Credit,
+}
+
+impl ExpandedCreditDelta {
+    fn total(&self) -> Credit {
+        self.left.total() + self.right.total() + self.unclassified_key + self.unclassified_combo
+    }
+
+    fn compact(&self) -> CreditDelta {
+        CreditDelta {
+            left: self.left.compact(),
+            right: self.right.compact(),
+            unclassified_key: self.unclassified_key + self.unclassified_combo,
+        }
+    }
+
+    fn boosted(
+        &self,
+        key_boost_fraction: f64,
+        click_boost_fraction: f64,
+        scroll_boost_fraction: f64,
+        drag_boost_fraction: f64,
+        modifier_boost_fraction: f64,
+        global_boost_fraction: f64,
+    ) -> CreditDelta {
+        ExpandedCreditDelta {
+            left: self.left.boosted(
+                key_boost_fraction,
+                click_boost_fraction,
+                scroll_boost_fraction,
+                drag_boost_fraction,
+                modifier_boost_fraction,
+                global_boost_fraction,
+            ),
+            right: self.right.boosted(
+                key_boost_fraction,
+                click_boost_fraction,
+                scroll_boost_fraction,
+                drag_boost_fraction,
+                modifier_boost_fraction,
+                global_boost_fraction,
+            ),
+            unclassified_key: boosted_credit(
+                self.unclassified_key,
+                key_boost_fraction,
+                global_boost_fraction,
+            ),
+            unclassified_combo: boosted_credit(
+                self.unclassified_combo,
+                key_boost_fraction,
+                global_boost_fraction,
+            ),
+        }
+        .compact()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ExpandedHandCreditDelta {
+    click: Credit,
+    drag: Credit,
+    key: Credit,
+    scroll: Credit,
+    modifier_duration: Credit,
+    same_hand_combo: Credit,
+}
+
+impl ExpandedHandCreditDelta {
+    fn total(&self) -> Credit {
+        self.click
+            + self.drag
+            + self.key
+            + self.scroll
+            + self.modifier_duration
+            + self.same_hand_combo
+    }
+
+    fn compact(&self) -> HandCreditDelta {
+        HandCreditDelta {
+            click: self.click,
+            drag: self.drag,
+            key: self.key,
+            scroll: self.scroll,
+            modifier: self.modifier_duration + self.same_hand_combo,
+        }
+    }
+
+    fn boosted(
+        &self,
+        key_boost_fraction: f64,
+        click_boost_fraction: f64,
+        scroll_boost_fraction: f64,
+        drag_boost_fraction: f64,
+        modifier_boost_fraction: f64,
+        global_boost_fraction: f64,
+    ) -> Self {
+        Self {
+            click: boosted_credit(self.click, click_boost_fraction, global_boost_fraction),
+            drag: boosted_credit(self.drag, drag_boost_fraction, global_boost_fraction),
+            key: boosted_credit(self.key, key_boost_fraction, global_boost_fraction),
+            scroll: boosted_credit(self.scroll, scroll_boost_fraction, global_boost_fraction),
+            modifier_duration: boosted_credit(
+                self.modifier_duration,
+                modifier_boost_fraction,
+                global_boost_fraction,
+            ),
+            same_hand_combo: boosted_credit(
+                self.same_hand_combo,
+                key_boost_fraction,
+                global_boost_fraction,
+            ),
+        }
+    }
+}
+
+fn boosted_credit(credit: Credit, local_boost_fraction: f64, global_boost_fraction: f64) -> Credit {
+    credit * (local_boost_fraction + global_boost_fraction)
+}
+
+fn base_credit(increment: &UsageIncrement, costs: &ResolvedCreditCosts) -> ExpandedCreditDelta {
     let delta = &increment.delta;
-    CreditDelta {
-        key: key_credit(delta, &costs.key),
-        click: Credit::new(delta.click_count as f64 * costs.click.per_click),
-        scroll: Credit::new(delta.scroll_count as f64 * costs.scroll.per_scroll),
-        drag: Credit::new(delta.drag_duration.as_secs_f64() * costs.drag.per_sec),
-        left_modifier: modifier_credit(&delta.left_modifier_duration, &costs.left_modifier),
-        right_modifier: modifier_credit(&delta.right_modifier_duration, &costs.right_modifier),
+    ExpandedCreditDelta {
+        left: hand_credit(&delta.left, &costs.left),
+        right: hand_credit(&delta.right, &costs.right),
+        unclassified_key: Credit::new(delta.unclassified_key_count as f64 * costs.unclassified.key),
+        unclassified_combo: Credit::new(
+            delta.unclassified_key_combo as f64 * costs.unclassified.combo,
+        ),
     }
 }
 
-fn key_credit(delta: &shared::model::UsageDelta, costs: &config::KeyCostConfig) -> KeyCreditDelta {
-    KeyCreditDelta {
-        left: Credit::new(delta.key_count.left as f64 * costs.left),
-        right: Credit::new(delta.key_count.right as f64 * costs.right),
-        other: Credit::new(delta.key_count.other as f64 * costs.other),
-        left_combo: Credit::new(delta.left_modifier_duration.combo as f64 * costs.left_combo),
-        right_combo: Credit::new(delta.right_modifier_duration.combo as f64 * costs.right_combo),
-        cross_combo: Credit::new(delta.cross_combo as f64 * costs.cross_combo),
-        other_combo: Credit::new(delta.other_combo as f64 * costs.other_combo),
+fn hand_credit(delta: &HandUsageDelta, costs: &HandCostConfig) -> ExpandedHandCreditDelta {
+    ExpandedHandCreditDelta {
+        click: Credit::new(delta.click_count as f64 * costs.click),
+        drag: Credit::new(delta.drag_duration.as_secs_f64() * costs.drag_per_sec),
+        key: Credit::new(delta.key_count as f64 * costs.key),
+        scroll: Credit::new(delta.scroll_count as f64 * costs.scroll),
+        modifier_duration: modifier_credit(&delta.modifier, &costs.modifier),
+        same_hand_combo: Credit::new(delta.modifier.same_hand_combo as f64 * costs.same_hand_combo),
     }
 }
 
-fn modifier_credit(delta: &ModifierUsageDelta, costs: &ModifierCostConfig) -> ModifierCreditDelta {
-    ModifierCreditDelta {
-        shift: Credit::new(delta.shift.as_secs_f64() * costs.shift_per_sec),
-        ctrl: Credit::new(delta.ctrl.as_secs_f64() * costs.ctrl_per_sec),
-        alt: Credit::new(delta.alt.as_secs_f64() * costs.alt_per_sec),
-        meta: Credit::new(delta.meta.as_secs_f64() * costs.meta_per_sec),
-        multi: Credit::new(delta.multi.as_secs_f64() * costs.multi_per_sec),
-    }
+fn modifier_credit(delta: &ModifierUsageDelta, costs: &ModifierCostConfig) -> Credit {
+    Credit::new(delta.shift.as_secs_f64() * costs.shift_per_sec)
+        + Credit::new(delta.ctrl.as_secs_f64() * costs.ctrl_per_sec)
+        + Credit::new(delta.alt.as_secs_f64() * costs.alt_per_sec)
+        + Credit::new(delta.meta.as_secs_f64() * costs.meta_per_sec)
+        + Credit::new(delta.multi.as_secs_f64() * costs.multi_per_sec)
 }
 
 fn modifier_duration_secs(delta: &ModifierUsageDelta) -> f64 {
@@ -232,16 +350,18 @@ fn modifier_duration_secs(delta: &ModifierUsageDelta) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::config::*;
     use super::*;
     use jiff::Timestamp;
-    use shared::model::{KeyCount, UsageDelta};
+    use shared::model::{HandUsageDelta, ModifierUsageDelta, UsageDelta};
     use std::time::Duration;
 
-    fn key_count(total: u64) -> KeyCount {
-        KeyCount {
-            left: total,
-            ..KeyCount::default()
+    fn left_key_delta(total: u64) -> UsageDelta {
+        UsageDelta {
+            left: HandUsageDelta {
+                key_count: total,
+                ..HandUsageDelta::default()
+            },
+            ..UsageDelta::default()
         }
     }
 
@@ -251,8 +371,7 @@ mod tests {
         config.rate_boost.click.enabled = false;
         config.rate_boost.scroll.enabled = false;
         config.rate_boost.drag.enabled = false;
-        config.rate_boost.left_modifier.enabled = false;
-        config.rate_boost.right_modifier.enabled = false;
+        config.rate_boost.modifier.enabled = false;
         config.global_boost.enabled = false;
         config
     }
@@ -278,100 +397,110 @@ mod tests {
     fn base_credit_is_linear_in_usage_amount() {
         let mut calculator = CreditCalculator::new(unboosted_config());
         let delta = UsageDelta {
-            key_count: KeyCount {
-                left: 3,
-                right: 4,
-                other: 5,
+            left: HandUsageDelta {
+                click_count: 2,
+                drag_duration: Duration::from_secs(2),
+                key_count: 3,
+                scroll_count: 8,
+                modifier: ModifierUsageDelta {
+                    shift: Duration::from_secs(1),
+                    alt: Duration::from_secs(2),
+                    multi: Duration::from_secs(3),
+                    ..ModifierUsageDelta::default()
+                },
             },
-            click_count: 2,
-            scroll_count: 8,
-            drag_duration: Duration::from_secs(2),
-            left_modifier_duration: ModifierUsageDelta {
-                shift: Duration::from_secs(1),
-                alt: Duration::from_secs(2),
-                multi: Duration::from_secs(3),
-                ..ModifierUsageDelta::default()
+            right: HandUsageDelta {
+                click_count: 3,
+                drag_duration: Duration::from_secs(1),
+                key_count: 4,
+                scroll_count: 4,
+                modifier: ModifierUsageDelta {
+                    ctrl: Duration::from_millis(500),
+                    ..ModifierUsageDelta::default()
+                },
             },
-            right_modifier_duration: ModifierUsageDelta {
-                ctrl: Duration::from_millis(500),
-                ..ModifierUsageDelta::default()
-            },
+            unclassified_key_count: 5,
+            unclassified_key_combo: 6,
             ..UsageDelta::default()
         };
 
         let credit = calculator.calculate(&increment(delta, 0, 2));
 
-        assert_close(credit.base.key.total().as_f64(), 12.0);
-        assert_close(credit.base.click.as_f64(), 4.0);
-        assert_close(credit.base.scroll.as_f64(), 2.0);
-        assert_close(credit.base.drag.as_f64(), 6.0);
-        assert_close(credit.base.left_modifier.shift.as_f64(), 5.0);
-        assert_close(credit.base.left_modifier.alt.as_f64(), 6.0);
-        assert_close(credit.base.left_modifier.multi.as_f64(), 3.0);
-        assert_close(credit.base.right_modifier.ctrl.as_f64(), 2.5);
+        assert_close(credit.base.left.key.as_f64(), 3.0);
+        assert_close(credit.base.right.key.as_f64(), 4.0);
+        assert_close(credit.base.unclassified_key.as_f64(), 11.6);
+        assert_close(credit.base.left.click.as_f64(), 4.0);
+        assert_close(credit.base.right.click.as_f64(), 6.0);
+        assert_close(credit.base.left.scroll.as_f64(), 2.0);
+        assert_close(credit.base.right.scroll.as_f64(), 1.0);
+        assert_close(credit.base.left.drag.as_f64(), 6.0);
+        assert_close(credit.base.right.drag.as_f64(), 3.0);
+        assert_close(credit.base.left.modifier.as_f64(), 14.0);
+        assert_close(credit.base.right.modifier.as_f64(), 2.5);
         assert_close(credit.boost.total().as_f64(), 0.0);
     }
 
     #[test]
-    fn base_key_credit_uses_per_hand_and_combo_costs() {
+    fn base_key_credit_uses_per_hand_combo_and_unclassified_costs() {
         let mut config = unboosted_config();
-        config.costs.key = KeyCostConfig {
-            left: 1.0,
-            right: 2.0,
-            other: 3.0,
-            left_combo: 4.0,
-            right_combo: 5.0,
-            cross_combo: 6.0,
-            other_combo: 7.0,
-        };
+        config.costs.left.key = 1.0;
+        config.costs.right.key = 2.0;
+        config.costs.left.same_hand_combo = 4.0;
+        config.costs.right.same_hand_combo = 5.0;
+        config.costs.unclassified.key = 3.0;
+        config.costs.unclassified.combo = 7.0;
         let mut calculator = CreditCalculator::new(config);
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                key_count: KeyCount {
-                    left: 2,
-                    right: 3,
-                    other: 4,
+                left: HandUsageDelta {
+                    key_count: 2,
+                    modifier: ModifierUsageDelta {
+                        same_hand_combo: 5,
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
-                left_modifier_duration: ModifierUsageDelta {
-                    combo: 5,
-                    ..ModifierUsageDelta::default()
+                right: HandUsageDelta {
+                    key_count: 3,
+                    modifier: ModifierUsageDelta {
+                        same_hand_combo: 6,
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
-                right_modifier_duration: ModifierUsageDelta {
-                    combo: 6,
-                    ..ModifierUsageDelta::default()
-                },
-                cross_combo: 7,
-                other_combo: 8,
+                unclassified_key_count: 4,
+                unclassified_key_combo: 8,
                 ..UsageDelta::default()
             },
             0,
             1,
         ));
 
-        assert_close(credit.base.key.left.as_f64(), 2.0);
-        assert_close(credit.base.key.right.as_f64(), 6.0);
-        assert_close(credit.base.key.other.as_f64(), 12.0);
-        assert_close(credit.base.key.left_combo.as_f64(), 20.0);
-        assert_close(credit.base.key.right_combo.as_f64(), 30.0);
-        assert_close(credit.base.key.cross_combo.as_f64(), 42.0);
-        assert_close(credit.base.key.other_combo.as_f64(), 56.0);
-        assert_close(credit.base.key.total().as_f64(), 168.0);
+        assert_close(credit.base.left.key.as_f64(), 2.0);
+        assert_close(credit.base.right.key.as_f64(), 6.0);
+        assert_close(credit.base.left.modifier.as_f64(), 20.0);
+        assert_close(credit.base.right.modifier.as_f64(), 30.0);
+        assert_close(credit.base.unclassified_key.as_f64(), 68.0);
+        assert_close(credit.base.total().as_f64(), 126.0);
         assert_close(credit.boost.total().as_f64(), 0.0);
     }
 
     #[test]
     fn modifier_credit_charges_multi_addon_separately() {
         let mut config = unboosted_config();
-        config.costs.left_modifier.multi_per_sec = 0.5;
+        config.costs.left.modifier.multi_per_sec = 0.5;
         let mut calculator = CreditCalculator::new(config);
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                left_modifier_duration: ModifierUsageDelta {
-                    shift: Duration::from_secs(2),
-                    multi: Duration::from_secs(4),
-                    ..ModifierUsageDelta::default()
+                left: HandUsageDelta {
+                    modifier: ModifierUsageDelta {
+                        shift: Duration::from_secs(2),
+                        multi: Duration::from_secs(4),
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
                 ..UsageDelta::default()
             },
@@ -379,9 +508,7 @@ mod tests {
             1,
         ));
 
-        assert_close(credit.base.left_modifier.shift.as_f64(), 10.0);
-        assert_close(credit.base.left_modifier.multi.as_f64(), 2.0);
-        assert_close(credit.base.left_modifier.total().as_f64(), 12.0);
+        assert_close(credit.base.left.modifier.as_f64(), 12.0);
     }
 
     #[test]
@@ -396,25 +523,28 @@ mod tests {
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                key_count: key_count(2),
-                click_count: 1,
+                left: HandUsageDelta {
+                    click_count: 1,
+                    key_count: 2,
+                    ..HandUsageDelta::default()
+                },
                 ..UsageDelta::default()
             },
             0,
             1,
         ));
 
-        assert_close(credit.base.key.total().as_f64(), 2.0);
+        assert_close(credit.base.left.key.as_f64(), 2.0);
         assert!(
-            credit.boost.key.total().as_f64() > 5.99,
+            credit.boost.left.key.as_f64() > 5.99,
             "key boost should be reported separately: {credit:?}"
         );
-        assert_close(credit.base.click.as_f64(), 2.0);
-        assert_close(credit.boost.click.as_f64(), 0.0);
+        assert_close(credit.base.left.click.as_f64(), 2.0);
+        assert_close(credit.boost.left.click.as_f64(), 0.0);
     }
 
     #[test]
-    fn key_local_boost_rate_includes_combo_events() {
+    fn key_local_boost_rate_includes_combo_and_unclassified_events() {
         let mut config = unboosted_config();
         config.rate_boost.key.enabled = true;
         config.rate_boost.key.baseline_per_sec = 0.5;
@@ -425,38 +555,46 @@ mod tests {
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                left_modifier_duration: ModifierUsageDelta {
-                    combo: 2,
-                    ..ModifierUsageDelta::default()
+                left: HandUsageDelta {
+                    modifier: ModifierUsageDelta {
+                        same_hand_combo: 1,
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
+                unclassified_key_combo: 1,
                 ..UsageDelta::default()
             },
             0,
             1,
         ));
 
-        assert_close(credit.base.key.total().as_f64(), 2.5);
+        assert_close(credit.base.left.modifier.as_f64(), 1.25);
+        assert_close(credit.base.unclassified_key.as_f64(), 1.1);
         assert!(
-            credit.boost.key.total().as_f64() > 7.49,
-            "combo key events should drive key boost: {credit:?}"
+            credit.boost.total().as_f64() > 7.04,
+            "combo and unclassified key events should drive key boost: {credit:?}"
         );
     }
 
     #[test]
     fn modifier_local_boost_rate_excludes_multi_overlap() {
         let mut config = unboosted_config();
-        config.rate_boost.left_modifier.enabled = true;
-        config.rate_boost.left_modifier.baseline_per_sec = 1.5;
-        config.rate_boost.left_modifier.factor = 1.0;
-        config.rate_boost.left_modifier.cap = 10.0;
-        config.rate_boost.left_modifier.smoothing_secs = 0.01;
+        config.rate_boost.modifier.enabled = true;
+        config.rate_boost.modifier.baseline_per_sec = 1.5;
+        config.rate_boost.modifier.factor = 1.0;
+        config.rate_boost.modifier.cap = 10.0;
+        config.rate_boost.modifier.smoothing_secs = 0.01;
         let mut calculator = CreditCalculator::new(config);
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                left_modifier_duration: ModifierUsageDelta {
-                    multi: Duration::from_secs(2),
-                    ..ModifierUsageDelta::default()
+                left: HandUsageDelta {
+                    modifier: ModifierUsageDelta {
+                        multi: Duration::from_secs(2),
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
                 ..UsageDelta::default()
             },
@@ -464,26 +602,29 @@ mod tests {
             1,
         ));
 
-        assert_close(credit.base.left_modifier.multi.as_f64(), 2.0);
-        assert_close(credit.boost.left_modifier.multi.as_f64(), 0.0);
+        assert_close(credit.base.left.modifier.as_f64(), 2.0);
+        assert_close(credit.boost.left.modifier.as_f64(), 0.0);
     }
 
     #[test]
     fn modifier_local_boost_scales_multi_credit_when_duration_drives_rate() {
         let mut config = unboosted_config();
-        config.rate_boost.left_modifier.enabled = true;
-        config.rate_boost.left_modifier.baseline_per_sec = 0.5;
-        config.rate_boost.left_modifier.factor = 1.0;
-        config.rate_boost.left_modifier.cap = 10.0;
-        config.rate_boost.left_modifier.smoothing_secs = 0.01;
+        config.rate_boost.modifier.enabled = true;
+        config.rate_boost.modifier.baseline_per_sec = 0.5;
+        config.rate_boost.modifier.factor = 1.0;
+        config.rate_boost.modifier.cap = 10.0;
+        config.rate_boost.modifier.smoothing_secs = 0.01;
         let mut calculator = CreditCalculator::new(config);
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                left_modifier_duration: ModifierUsageDelta {
-                    shift: Duration::from_secs(1),
-                    multi: Duration::from_secs(1),
-                    ..ModifierUsageDelta::default()
+                left: HandUsageDelta {
+                    modifier: ModifierUsageDelta {
+                        shift: Duration::from_secs(1),
+                        multi: Duration::from_secs(1),
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
                 ..UsageDelta::default()
             },
@@ -491,26 +632,29 @@ mod tests {
             1,
         ));
 
-        assert_close(credit.base.left_modifier.multi.as_f64(), 1.0);
-        assert_close(credit.boost.left_modifier.multi.as_f64(), 1.0);
+        assert_close(credit.base.left.modifier.as_f64(), 6.0);
+        assert_close(credit.boost.left.modifier.as_f64(), 6.0);
     }
 
     #[test]
-    fn modifier_local_boost_rate_excludes_combo_count() {
+    fn modifier_local_boost_rate_excludes_same_hand_combo_count() {
         let mut config = unboosted_config();
-        config.rate_boost.left_modifier.enabled = true;
-        config.rate_boost.left_modifier.baseline_per_sec = 0.5;
-        config.rate_boost.left_modifier.factor = 1.0;
-        config.rate_boost.left_modifier.cap = 10.0;
-        config.rate_boost.left_modifier.smoothing_secs = 0.01;
+        config.rate_boost.modifier.enabled = true;
+        config.rate_boost.modifier.baseline_per_sec = 0.5;
+        config.rate_boost.modifier.factor = 1.0;
+        config.rate_boost.modifier.cap = 10.0;
+        config.rate_boost.modifier.smoothing_secs = 0.01;
         let mut calculator = CreditCalculator::new(config);
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                left_modifier_duration: ModifierUsageDelta {
-                    combo: 4,
-                    multi: Duration::from_secs(1),
-                    ..ModifierUsageDelta::default()
+                left: HandUsageDelta {
+                    modifier: ModifierUsageDelta {
+                        same_hand_combo: 4,
+                        multi: Duration::from_secs(1),
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
                 ..UsageDelta::default()
             },
@@ -518,9 +662,8 @@ mod tests {
             1,
         ));
 
-        assert_close(credit.base.key.total().as_f64(), 5.0);
-        assert_close(credit.base.left_modifier.multi.as_f64(), 1.0);
-        assert_close(credit.boost.left_modifier.multi.as_f64(), 0.0);
+        assert_close(credit.base.left.modifier.as_f64(), 6.0);
+        assert_close(credit.boost.left.modifier.as_f64(), 0.0);
     }
 
     #[test]
@@ -532,9 +675,12 @@ mod tests {
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                left_modifier_duration: ModifierUsageDelta {
-                    combo: 10,
-                    ..ModifierUsageDelta::default()
+                left: HandUsageDelta {
+                    modifier: ModifierUsageDelta {
+                        same_hand_combo: 10,
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
                 ..UsageDelta::default()
             },
@@ -542,7 +688,7 @@ mod tests {
             1,
         ));
 
-        assert_close(credit.base.key.total().as_f64(), 12.5);
+        assert_close(credit.base.left.modifier.as_f64(), 12.5);
         assert_close(credit.boost.total().as_f64(), 0.0);
     }
 
@@ -556,18 +702,11 @@ mod tests {
         config.global_boost.smoothing_secs = 0.01;
         let mut calculator = CreditCalculator::new(config);
 
-        let credit = calculator.calculate(&increment(
-            UsageDelta {
-                key_count: key_count(2),
-                ..UsageDelta::default()
-            },
-            0,
-            1,
-        ));
+        let credit = calculator.calculate(&increment(left_key_delta(2), 0, 1));
 
-        assert_close(credit.base.key.total().as_f64(), 2.0);
+        assert_close(credit.base.left.key.as_f64(), 2.0);
         assert!(
-            credit.boost.key.total().as_f64() > 1.99,
+            credit.boost.left.key.as_f64() > 1.99,
             "global boost should be reported separately: {credit:?}"
         );
     }
@@ -587,17 +726,10 @@ mod tests {
         config.global_boost.smoothing_secs = 0.01;
         let mut calculator = CreditCalculator::new(config);
 
-        let credit = calculator.calculate(&increment(
-            UsageDelta {
-                key_count: key_count(2),
-                ..UsageDelta::default()
-            },
-            0,
-            1,
-        ));
+        let credit = calculator.calculate(&increment(left_key_delta(2), 0, 1));
 
-        assert_close(credit.base.key.total().as_f64(), 2.0);
-        assert_close(credit.boost.key.total().as_f64(), 8.0);
+        assert_close(credit.base.left.key.as_f64(), 2.0);
+        assert_close(credit.boost.left.key.as_f64(), 8.0);
     }
 
     #[test]
@@ -615,18 +747,11 @@ mod tests {
         config.global_boost.smoothing_secs = 0.01;
         let mut calculator = CreditCalculator::new(config);
 
-        let credit = calculator.calculate(&increment(
-            UsageDelta {
-                key_count: key_count(2),
-                ..UsageDelta::default()
-            },
-            0,
-            1,
-        ));
+        let credit = calculator.calculate(&increment(left_key_delta(2), 0, 1));
 
-        assert_close(credit.base.key.total().as_f64(), 2.0);
+        assert_close(credit.base.left.key.as_f64(), 2.0);
         assert!(
-            credit.boost.key.total().as_f64() > 5.99,
+            credit.boost.left.key.as_f64() > 5.99,
             "local boost should still apply: {credit:?}"
         );
         assert!(
@@ -647,10 +772,13 @@ mod tests {
 
         let credit = calculator.calculate(&increment(
             UsageDelta {
-                left_modifier_duration: ModifierUsageDelta {
-                    combo: 1,
-                    multi: Duration::from_secs(1),
-                    ..ModifierUsageDelta::default()
+                left: HandUsageDelta {
+                    modifier: ModifierUsageDelta {
+                        same_hand_combo: 1,
+                        multi: Duration::from_secs(1),
+                        ..ModifierUsageDelta::default()
+                    },
+                    ..HandUsageDelta::default()
                 },
                 ..UsageDelta::default()
             },
@@ -658,8 +786,7 @@ mod tests {
             1,
         ));
 
-        assert_close(credit.base.key.total().as_f64(), 1.25);
-        assert_close(credit.base.left_modifier.multi.as_f64(), 1.0);
+        assert_close(credit.base.left.modifier.as_f64(), 2.25);
         assert!(
             credit.boost.total().as_f64() > 0.24,
             "global boost should see full base credit: {credit:?}"

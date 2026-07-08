@@ -1,11 +1,9 @@
 use crate::credit::limit::CreditLimitConsumer;
-use crate::credit::{
-    CreditDelta, CreditIncrement, KeyCreditDelta, ModifierCreditDelta, SplitCreditSnapshot,
-};
+use crate::credit::{CreditDelta, CreditIncrement, HandCreditDelta, SplitCreditSnapshot};
 use crate::pain::PainConsumer;
 use opentelemetry::metrics::{Counter, Gauge};
 use opentelemetry::{KeyValue, global};
-use shared::model::{ModifierUsageDelta, UsageDelta};
+use shared::model::{HandUsageDelta, ModifierUsageDelta, UsageDelta};
 use std::time::Duration;
 
 pub struct Instruments {
@@ -86,18 +84,33 @@ impl Instruments {
     }
 
     pub fn record_usage(&self, delta: &UsageDelta) {
-        self.clicks.add(delta.click_count, &[]);
-        self.drag_duration
-            .add(delta.drag_duration.as_secs_f64(), &[]);
-        self.key_presses.add(delta.key_event_count(), &[]);
-        self.scroll_ticks.add(delta.scroll_count, &[]);
-
-        self.record_modifier_duration("left", &delta.left_modifier_duration);
-        self.record_modifier_duration("right", &delta.right_modifier_duration);
+        self.record_hand_usage("left", &delta.left);
+        self.record_hand_usage("right", &delta.right);
+        self.key_presses.add(
+            delta.unclassified_key_count,
+            &key_attrs("unclassified", "key"),
+        );
+        self.key_presses.add(
+            delta.unclassified_key_combo,
+            &key_attrs("unclassified", "combo"),
+        );
     }
 
-    fn record_modifier_duration(&self, side: &'static str, delta: &ModifierUsageDelta) {
-        let attrs = |key: &'static str| [KeyValue::new("side", side), KeyValue::new("key", key)];
+    fn record_hand_usage(&self, hand: &'static str, delta: &HandUsageDelta) {
+        self.clicks.add(delta.click_count, &hand_attrs(hand));
+        self.drag_duration
+            .add(delta.drag_duration.as_secs_f64(), &hand_attrs(hand));
+        self.key_presses
+            .add(delta.key_count, &key_attrs(hand, "key"));
+        self.key_presses
+            .add(delta.modifier.same_hand_combo, &key_attrs(hand, "combo"));
+        self.scroll_ticks.add(delta.scroll_count, &hand_attrs(hand));
+        self.record_modifier_duration(hand, &delta.modifier);
+    }
+
+    fn record_modifier_duration(&self, hand: &'static str, delta: &ModifierUsageDelta) {
+        let attrs =
+            |source: &'static str| [KeyValue::new("hand", hand), KeyValue::new("source", source)];
         self.modifier_duration
             .add(delta.shift.as_secs_f64(), &attrs("shift"));
         self.modifier_duration
@@ -116,58 +129,38 @@ impl Instruments {
     }
 
     fn record_credit_delta(&self, credit_type: &'static str, delta: &CreditDelta) {
-        self.credit_all
-            .add(delta.click.as_f64(), &credit_attrs(credit_type, "click"));
-        self.credit_all
-            .add(delta.drag.as_f64(), &credit_attrs(credit_type, "drag"));
-        self.credit_all
-            .add(delta.scroll.as_f64(), &credit_attrs(credit_type, "scroll"));
-
-        self.record_key_credit(credit_type, &delta.key);
-        self.record_modifier_credit(credit_type, "left", &delta.left_modifier);
-        self.record_modifier_credit(credit_type, "right", &delta.right_modifier);
+        self.record_hand_credit(credit_type, "left", &delta.left);
+        self.record_hand_credit(credit_type, "right", &delta.right);
+        self.credit_all.add(
+            delta.unclassified_key.as_f64(),
+            &credit_attrs(credit_type, "key", "unclassified"),
+        );
     }
 
-    fn record_key_credit(&self, credit_type: &'static str, delta: &KeyCreditDelta) {
-        let attrs = |key: &'static str| {
-            [
-                KeyValue::new("type", credit_type),
-                KeyValue::new("source", "key"),
-                KeyValue::new("key", key),
-            ]
-        };
-        self.credit_all.add(delta.left.as_f64(), &attrs("left"));
-        self.credit_all.add(delta.right.as_f64(), &attrs("right"));
-        self.credit_all.add(delta.other.as_f64(), &attrs("other"));
-        self.credit_all
-            .add(delta.left_combo.as_f64(), &attrs("left_combo"));
-        self.credit_all
-            .add(delta.right_combo.as_f64(), &attrs("right_combo"));
-        self.credit_all
-            .add(delta.cross_combo.as_f64(), &attrs("cross_combo"));
-        self.credit_all
-            .add(delta.other_combo.as_f64(), &attrs("other_combo"));
-    }
-
-    fn record_modifier_credit(
+    fn record_hand_credit(
         &self,
         credit_type: &'static str,
-        side: &'static str,
-        delta: &ModifierCreditDelta,
+        hand: &'static str,
+        delta: &HandCreditDelta,
     ) {
-        let attrs = |key: &'static str| {
-            [
-                KeyValue::new("type", credit_type),
-                KeyValue::new("source", "modifier"),
-                KeyValue::new("side", side),
-                KeyValue::new("key", key),
-            ]
-        };
-        self.credit_all.add(delta.shift.as_f64(), &attrs("shift"));
-        self.credit_all.add(delta.ctrl.as_f64(), &attrs("ctrl"));
-        self.credit_all.add(delta.alt.as_f64(), &attrs("alt"));
-        self.credit_all.add(delta.meta.as_f64(), &attrs("meta"));
-        self.credit_all.add(delta.multi.as_f64(), &attrs("multi"));
+        self.credit_all.add(
+            delta.click.as_f64(),
+            &credit_attrs(credit_type, "click", hand),
+        );
+        self.credit_all.add(
+            delta.drag.as_f64(),
+            &credit_attrs(credit_type, "drag", hand),
+        );
+        self.credit_all
+            .add(delta.key.as_f64(), &credit_attrs(credit_type, "key", hand));
+        self.credit_all.add(
+            delta.scroll.as_f64(),
+            &credit_attrs(credit_type, "scroll", hand),
+        );
+        self.credit_all.add(
+            delta.modifier.as_f64(),
+            &credit_attrs(credit_type, "modifier", hand),
+        );
     }
 
     pub fn record_credit_gauges(
@@ -217,9 +210,22 @@ impl Instruments {
     }
 }
 
-fn credit_attrs(credit_type: &'static str, source: &'static str) -> [KeyValue; 2] {
+fn hand_attrs(hand: &'static str) -> [KeyValue; 1] {
+    [KeyValue::new("hand", hand)]
+}
+
+fn key_attrs(hand: &'static str, source: &'static str) -> [KeyValue; 2] {
+    [KeyValue::new("hand", hand), KeyValue::new("source", source)]
+}
+
+fn credit_attrs(
+    credit_type: &'static str,
+    source: &'static str,
+    hand: &'static str,
+) -> [KeyValue; 3] {
     [
         KeyValue::new("type", credit_type),
         KeyValue::new("source", source),
+        KeyValue::new("hand", hand),
     ]
 }

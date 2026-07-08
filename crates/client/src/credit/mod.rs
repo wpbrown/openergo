@@ -9,83 +9,45 @@ pub use shared::model::Credit;
 use std::ops::{Add, AddAssign};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct KeyCreditDelta {
-    pub left: Credit,
-    pub right: Credit,
-    pub other: Credit,
-    pub left_combo: Credit,
-    pub right_combo: Credit,
-    pub cross_combo: Credit,
-    pub other_combo: Credit,
-}
-
-impl AddAssign<&KeyCreditDelta> for KeyCreditDelta {
-    fn add_assign(&mut self, delta: &KeyCreditDelta) {
-        self.left += delta.left;
-        self.right += delta.right;
-        self.other += delta.other;
-        self.left_combo += delta.left_combo;
-        self.right_combo += delta.right_combo;
-        self.cross_combo += delta.cross_combo;
-        self.other_combo += delta.other_combo;
-    }
-}
-
-impl Add<&KeyCreditDelta> for KeyCreditDelta {
-    type Output = Self;
-
-    fn add(mut self, delta: &KeyCreditDelta) -> Self {
-        self += delta;
-        self
-    }
+pub struct CreditDelta {
+    pub left: HandCreditDelta,
+    pub right: HandCreditDelta,
+    pub unclassified_key: Credit,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct ModifierCreditDelta {
-    pub shift: Credit,
-    pub ctrl: Credit,
-    pub alt: Credit,
-    pub meta: Credit,
-    pub multi: Credit,
+pub struct HandCreditDelta {
+    pub click: Credit,
+    pub drag: Credit,
+    pub key: Credit,
+    pub scroll: Credit,
+    pub modifier: Credit,
 }
 
-impl AddAssign<&ModifierCreditDelta> for ModifierCreditDelta {
-    fn add_assign(&mut self, delta: &ModifierCreditDelta) {
-        self.shift += delta.shift;
-        self.ctrl += delta.ctrl;
-        self.alt += delta.alt;
-        self.meta += delta.meta;
-        self.multi += delta.multi;
+impl AddAssign<&HandCreditDelta> for HandCreditDelta {
+    fn add_assign(&mut self, delta: &HandCreditDelta) {
+        self.click += delta.click;
+        self.drag += delta.drag;
+        self.key += delta.key;
+        self.scroll += delta.scroll;
+        self.modifier += delta.modifier;
     }
 }
 
-impl Add<&ModifierCreditDelta> for ModifierCreditDelta {
+impl Add<&HandCreditDelta> for HandCreditDelta {
     type Output = Self;
 
-    fn add(mut self, delta: &ModifierCreditDelta) -> Self {
+    fn add(mut self, delta: &HandCreditDelta) -> Self {
         self += delta;
         self
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreditDelta {
-    pub click: Credit,
-    pub drag: Credit,
-    pub key: KeyCreditDelta,
-    pub scroll: Credit,
-    pub left_modifier: ModifierCreditDelta,
-    pub right_modifier: ModifierCreditDelta,
 }
 
 impl AddAssign<&CreditDelta> for CreditDelta {
     fn add_assign(&mut self, delta: &CreditDelta) {
-        self.click += delta.click;
-        self.drag += delta.drag;
-        self.key += &delta.key;
-        self.scroll += delta.scroll;
-        self.left_modifier += &delta.left_modifier;
-        self.right_modifier += &delta.right_modifier;
+        self.left += &delta.left;
+        self.right += &delta.right;
+        self.unclassified_key += delta.unclassified_key;
     }
 }
 
@@ -98,54 +60,15 @@ impl Add<&CreditDelta> for CreditDelta {
     }
 }
 
-impl KeyCreditDelta {
+impl HandCreditDelta {
     pub fn total(&self) -> Credit {
-        self.left
-            + self.right
-            + self.other
-            + self.left_combo
-            + self.right_combo
-            + self.cross_combo
-            + self.other_combo
-    }
-
-    pub fn scaled(&self, multiplier: f64) -> Self {
-        Self {
-            left: self.left * multiplier,
-            right: self.right * multiplier,
-            other: self.other * multiplier,
-            left_combo: self.left_combo * multiplier,
-            right_combo: self.right_combo * multiplier,
-            cross_combo: self.cross_combo * multiplier,
-            other_combo: self.other_combo * multiplier,
-        }
-    }
-}
-
-impl ModifierCreditDelta {
-    pub fn total(&self) -> Credit {
-        self.shift + self.ctrl + self.alt + self.meta + self.multi
-    }
-
-    pub fn scaled(&self, multiplier: f64) -> Self {
-        Self {
-            shift: self.shift * multiplier,
-            ctrl: self.ctrl * multiplier,
-            alt: self.alt * multiplier,
-            meta: self.meta * multiplier,
-            multi: self.multi * multiplier,
-        }
+        self.click + self.drag + self.key + self.scroll + self.modifier
     }
 }
 
 impl CreditDelta {
     pub fn total(&self) -> Credit {
-        self.click
-            + self.drag
-            + self.key.total()
-            + self.scroll
-            + self.left_modifier.total()
-            + self.right_modifier.total()
+        self.left.total() + self.right.total() + self.unclassified_key
     }
 }
 
@@ -178,124 +101,61 @@ impl CreditIncrement {
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct KeyCreditSnapshot {
-    pub left: Credit,
-    pub right: Credit,
-    pub other: Credit,
-    pub left_combo: Credit,
-    pub right_combo: Credit,
-    pub cross_combo: Credit,
-    pub other_combo: Credit,
-}
-
-impl AddAssign<&KeyCreditDelta> for KeyCreditSnapshot {
-    fn add_assign(&mut self, delta: &KeyCreditDelta) {
-        self.left += delta.left;
-        self.right += delta.right;
-        self.other += delta.other;
-        self.left_combo += delta.left_combo;
-        self.right_combo += delta.right_combo;
-        self.cross_combo += delta.cross_combo;
-        self.other_combo += delta.other_combo;
-    }
-}
-
-impl Add<&KeyCreditDelta> for KeyCreditSnapshot {
-    type Output = Self;
-
-    fn add(mut self, delta: &KeyCreditDelta) -> Self {
-        self += delta;
-        self
-    }
-}
-
-impl KeyCreditSnapshot {
-    pub fn saturating_delta(&self, previous: &KeyCreditSnapshot) -> KeyCreditDelta {
-        KeyCreditDelta {
-            left: self.left.saturating_sub_zero(previous.left),
-            right: self.right.saturating_sub_zero(previous.right),
-            other: self.other.saturating_sub_zero(previous.other),
-            left_combo: self.left_combo.saturating_sub_zero(previous.left_combo),
-            right_combo: self.right_combo.saturating_sub_zero(previous.right_combo),
-            cross_combo: self.cross_combo.saturating_sub_zero(previous.cross_combo),
-            other_combo: self.other_combo.saturating_sub_zero(previous.other_combo),
-        }
-    }
-
-    pub fn total(&self) -> Credit {
-        self.left
-            + self.right
-            + self.other
-            + self.left_combo
-            + self.right_combo
-            + self.cross_combo
-            + self.other_combo
-    }
+pub struct CreditSnapshot {
+    pub left: HandCreditSnapshot,
+    pub right: HandCreditSnapshot,
+    pub unclassified_key: Credit,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct ModifierCreditSnapshot {
-    pub shift: Credit,
-    pub ctrl: Credit,
-    pub alt: Credit,
-    pub meta: Credit,
-    pub multi: Credit,
+pub struct HandCreditSnapshot {
+    pub click: Credit,
+    pub drag: Credit,
+    pub key: Credit,
+    pub scroll: Credit,
+    pub modifier: Credit,
 }
 
-impl AddAssign<&ModifierCreditDelta> for ModifierCreditSnapshot {
-    fn add_assign(&mut self, delta: &ModifierCreditDelta) {
-        self.shift += delta.shift;
-        self.ctrl += delta.ctrl;
-        self.alt += delta.alt;
-        self.meta += delta.meta;
-        self.multi += delta.multi;
+impl AddAssign<&HandCreditDelta> for HandCreditSnapshot {
+    fn add_assign(&mut self, delta: &HandCreditDelta) {
+        self.click += delta.click;
+        self.drag += delta.drag;
+        self.key += delta.key;
+        self.scroll += delta.scroll;
+        self.modifier += delta.modifier;
     }
 }
 
-impl Add<&ModifierCreditDelta> for ModifierCreditSnapshot {
+impl Add<&HandCreditDelta> for HandCreditSnapshot {
     type Output = Self;
 
-    fn add(mut self, delta: &ModifierCreditDelta) -> Self {
+    fn add(mut self, delta: &HandCreditDelta) -> Self {
         self += delta;
         self
     }
 }
 
-impl ModifierCreditSnapshot {
-    pub fn saturating_delta(&self, previous: &ModifierCreditSnapshot) -> ModifierCreditDelta {
-        ModifierCreditDelta {
-            shift: self.shift.saturating_sub_zero(previous.shift),
-            ctrl: self.ctrl.saturating_sub_zero(previous.ctrl),
-            alt: self.alt.saturating_sub_zero(previous.alt),
-            meta: self.meta.saturating_sub_zero(previous.meta),
-            multi: self.multi.saturating_sub_zero(previous.multi),
+impl HandCreditSnapshot {
+    pub fn saturating_delta(&self, previous: &HandCreditSnapshot) -> HandCreditDelta {
+        HandCreditDelta {
+            click: self.click.saturating_sub_zero(previous.click),
+            drag: self.drag.saturating_sub_zero(previous.drag),
+            key: self.key.saturating_sub_zero(previous.key),
+            scroll: self.scroll.saturating_sub_zero(previous.scroll),
+            modifier: self.modifier.saturating_sub_zero(previous.modifier),
         }
     }
 
-    /// Sum of all modifier credit fields.
     pub fn total(&self) -> Credit {
-        self.shift + self.ctrl + self.alt + self.meta + self.multi
+        self.click + self.drag + self.key + self.scroll + self.modifier
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreditSnapshot {
-    pub click: Credit,
-    pub drag: Credit,
-    pub key: KeyCreditSnapshot,
-    pub scroll: Credit,
-    pub left_modifier: ModifierCreditSnapshot,
-    pub right_modifier: ModifierCreditSnapshot,
 }
 
 impl AddAssign<&CreditDelta> for CreditSnapshot {
     fn add_assign(&mut self, delta: &CreditDelta) {
-        self.click += delta.click;
-        self.drag += delta.drag;
-        self.key += &delta.key;
-        self.scroll += delta.scroll;
-        self.left_modifier += &delta.left_modifier;
-        self.right_modifier += &delta.right_modifier;
+        self.left += &delta.left;
+        self.right += &delta.right;
+        self.unclassified_key += delta.unclassified_key;
     }
 }
 
@@ -311,25 +171,16 @@ impl Add<&CreditDelta> for CreditSnapshot {
 impl CreditSnapshot {
     pub fn saturating_delta(&self, previous: &CreditSnapshot) -> CreditDelta {
         CreditDelta {
-            click: self.click.saturating_sub_zero(previous.click),
-            drag: self.drag.saturating_sub_zero(previous.drag),
-            key: self.key.saturating_delta(&previous.key),
-            scroll: self.scroll.saturating_sub_zero(previous.scroll),
-            left_modifier: self.left_modifier.saturating_delta(&previous.left_modifier),
-            right_modifier: self
-                .right_modifier
-                .saturating_delta(&previous.right_modifier),
+            left: self.left.saturating_delta(&previous.left),
+            right: self.right.saturating_delta(&previous.right),
+            unclassified_key: self
+                .unclassified_key
+                .saturating_sub_zero(previous.unclassified_key),
         }
     }
 
-    /// Sum of every per-activity and per-modifier credit field.
     pub fn total(&self) -> Credit {
-        self.click
-            + self.drag
-            + self.key.total()
-            + self.scroll
-            + self.left_modifier.total()
-            + self.right_modifier.total()
+        self.left.total() + self.right.total() + self.unclassified_key
     }
 }
 
@@ -373,73 +224,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn key_credit_participates_in_arithmetic_and_deltas() {
-        let delta = KeyCreditDelta {
-            left: Credit::new(1.0),
-            left_combo: Credit::new(2.0),
-            ..KeyCreditDelta::default()
+    fn hand_credit_participates_in_arithmetic_and_deltas() {
+        let delta = HandCreditDelta {
+            key: Credit::new(1.0),
+            modifier: Credit::new(2.0),
+            ..HandCreditDelta::default()
         };
-        let scaled = delta.scaled(1.5);
 
         assert_eq!(delta.total(), Credit::new(3.0));
-        assert_eq!(scaled.left, Credit::new(1.5));
-        assert_eq!(scaled.left_combo, Credit::new(3.0));
 
-        let mut snapshot = KeyCreditSnapshot::default();
+        let mut snapshot = HandCreditSnapshot::default();
         snapshot += &delta;
-        let previous = KeyCreditSnapshot {
-            left_combo: Credit::new(0.5),
-            ..KeyCreditSnapshot::default()
+        let previous = HandCreditSnapshot {
+            modifier: Credit::new(0.5),
+            ..HandCreditSnapshot::default()
         };
 
         assert_eq!(snapshot.total(), Credit::new(3.0));
         assert_eq!(
-            snapshot.saturating_delta(&previous).left_combo,
+            snapshot.saturating_delta(&previous).modifier,
             Credit::new(1.5)
         );
     }
 
     #[test]
-    fn modifier_multi_credit_participates_in_arithmetic_and_deltas() {
-        let delta = ModifierCreditDelta {
-            shift: Credit::new(1.0),
-            multi: Credit::new(2.0),
-            ..ModifierCreditDelta::default()
+    fn compact_credit_participates_in_arithmetic_and_deltas() {
+        let delta = CreditDelta {
+            left: HandCreditDelta {
+                key: Credit::new(1.0),
+                ..HandCreditDelta::default()
+            },
+            unclassified_key: Credit::new(2.0),
+            ..CreditDelta::default()
         };
-        let scaled = delta.scaled(1.5);
 
         assert_eq!(delta.total(), Credit::new(3.0));
-        assert_eq!(scaled.shift, Credit::new(1.5));
-        assert_eq!(scaled.multi, Credit::new(3.0));
 
-        let mut snapshot = ModifierCreditSnapshot::default();
+        let mut snapshot = CreditSnapshot::default();
         snapshot += &delta;
-        let previous = ModifierCreditSnapshot {
-            multi: Credit::new(0.5),
-            ..ModifierCreditSnapshot::default()
+        let previous = CreditSnapshot {
+            unclassified_key: Credit::new(0.5),
+            ..CreditSnapshot::default()
         };
 
         assert_eq!(snapshot.total(), Credit::new(3.0));
-        assert_eq!(snapshot.saturating_delta(&previous).multi, Credit::new(1.5));
+        assert_eq!(
+            snapshot.saturating_delta(&previous).unclassified_key,
+            Credit::new(1.5)
+        );
     }
 
     #[test]
     fn split_credit_total_sums_base_and_boost_snapshots() {
         let snapshot = SplitCreditSnapshot {
             base: CreditSnapshot {
-                key: KeyCreditSnapshot {
-                    left: Credit::new(3.0),
-                    ..KeyCreditSnapshot::default()
+                left: HandCreditSnapshot {
+                    key: Credit::new(3.0),
+                    ..HandCreditSnapshot::default()
                 },
-                click: Credit::new(2.0),
+                unclassified_key: Credit::new(2.0),
                 ..CreditSnapshot::default()
             },
             boost: CreditSnapshot {
-                key: KeyCreditSnapshot {
-                    left_combo: Credit::new(1.5),
-                    ..KeyCreditSnapshot::default()
+                left: HandCreditSnapshot {
+                    modifier: Credit::new(1.5),
+                    ..HandCreditSnapshot::default()
                 },
-                scroll: Credit::new(0.5),
+                right: HandCreditSnapshot {
+                    scroll: Credit::new(0.5),
+                    ..HandCreditSnapshot::default()
+                },
                 ..CreditSnapshot::default()
             },
         };

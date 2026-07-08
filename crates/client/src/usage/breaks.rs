@@ -24,8 +24,18 @@ pub struct BreakState {
 }
 
 impl BreakState {
+    #[cfg(test)]
+    pub fn usage(&self) -> &UsageSnapshot {
+        &self.usage
+    }
+
     pub fn credit(&self) -> &SplitCreditSnapshot {
         &self.credit
+    }
+
+    fn apply_increment(&mut self, increment: &UsageIncrement, credit: &CreditIncrement) {
+        self.usage += &increment.delta;
+        self.credit += credit;
     }
 }
 
@@ -61,8 +71,7 @@ impl Driver {
         usage_rx
             .recv_ref(|(increment, credit)| {
                 let _ = state_tx.update(|state| {
-                    state.usage += &increment.delta;
-                    state.credit += credit;
+                    state.apply_increment(increment, credit);
                 });
             })
             .await
@@ -200,5 +209,51 @@ impl Driver {
                 last_decay = now;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credit::{Credit, CreditDelta, HandCreditDelta};
+    use jiff::Timestamp;
+    use shared::model::{HandUsageDelta, ModifierUsageDelta, UsageDelta};
+
+    fn increment(delta: UsageDelta) -> UsageIncrement {
+        UsageIncrement::new(
+            delta,
+            Timestamp::from_second(1).unwrap(),
+            Timestamp::from_second(2).unwrap(),
+        )
+    }
+
+    #[test]
+    fn accumulates_handed_usage_and_compact_credit() {
+        let mut state = BreakState::default();
+        let increment = increment(UsageDelta {
+            right: HandUsageDelta {
+                modifier: ModifierUsageDelta {
+                    same_hand_combo: 3,
+                    ..ModifierUsageDelta::default()
+                },
+                ..HandUsageDelta::default()
+            },
+            ..UsageDelta::default()
+        });
+        let credit = CreditIncrement {
+            base: CreditDelta {
+                right: HandCreditDelta {
+                    modifier: Credit::new(4.0),
+                    ..HandCreditDelta::default()
+                },
+                ..CreditDelta::default()
+            },
+            boost: CreditDelta::default(),
+        };
+
+        state.apply_increment(&increment, &credit);
+
+        assert_eq!(state.usage().right.modifier.same_hand_combo, 3);
+        assert_eq!(state.credit().base.right.modifier, Credit::new(4.0));
     }
 }
