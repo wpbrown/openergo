@@ -3,13 +3,24 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/openergo.toml";
+
+fn load_path(path: Option<&Path>) -> &Path {
+    path.unwrap_or_else(|| Path::new(DEFAULT_CONFIG_PATH))
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
+pub struct ConfigFile {
     pub socket: Option<SocketConfig>,
     pub dwell_click: Option<DwellClickConfig>,
     pub devices: Option<DevicesConfig>,
     pub usage: Option<UsageConfig>,
+}
+
+pub struct ConfigArgs {
+    pub socket_path: Option<PathBuf>,
+    pub socket_user: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -120,95 +131,14 @@ pub struct DeviceMatcher {
     pub bus: Option<String>,
 }
 
-impl DeviceMatcher {
-    fn is_empty(&self) -> bool {
-        self.path.is_none()
-            && self.name.is_none()
-            && self.model.is_none()
-            && self.model_id.is_none()
-            && self.vendor_id.is_none()
-            && self.serial.is_none()
-            && self.bus.is_none()
-    }
-}
-
-/// Returns true if `label` is a valid friendly device label: non-empty and
-/// composed only of ASCII alphanumerics, `_`, or `-`.
-fn is_valid_label(label: &str) -> bool {
-    !label.is_empty()
-        && label
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-impl Config {
-    pub fn load(path: &Path) -> Result<Self, Report> {
+impl ConfigFile {
+    pub fn load(path: Option<&Path>) -> Result<Self, Report> {
+        let path = load_path(path);
         let content = std::fs::read_to_string(path)
             .context("Failed to read config file")
             .attach(format!("path: {}", path.display()))?;
-        let config: Config = toml::from_str(&content).context("Failed to parse config file")?;
-        config.validate()?;
+        let config = toml::from_str(&content).context("Failed to parse config file")?;
         Ok(config)
-    }
-
-    fn validate(&self) -> Result<(), Report> {
-        if let Some(devices) = &self.devices {
-            let validate_matchers =
-                |matchers: &HashMap<String, DeviceMatcher>, section: &str| -> Result<(), Report> {
-                    for (label, matcher) in matchers {
-                        if !is_valid_label(label) {
-                            bail!(
-                                "devices.{section} key {label:?} is not a valid label \
-                                 (must be non-empty ASCII alphanumerics, '_' or '-')"
-                            );
-                        }
-                        if matcher.is_empty() {
-                            bail!("devices.{section}.{label} has no fields set");
-                        }
-                    }
-                    Ok(())
-                };
-
-            if let Some(include) = &devices.include {
-                validate_matchers(include, "include")?;
-            }
-            if let Some(exclude) = &devices.exclude {
-                validate_matchers(exclude, "exclude")?;
-            }
-
-            if !devices.auto_detect() && devices.include.as_ref().is_none_or(HashMap::is_empty) {
-                bail!(
-                    "auto_detect is false and no include rules are set; \
-                     no devices would be monitored"
-                );
-            }
-        }
-
-        if let Some(usage) = &self.usage {
-            if let Some(exclude) = &usage.exclude {
-                for label in exclude {
-                    if !is_valid_label(label) {
-                        bail!(
-                            "usage.exclude entry {label:?} is not a valid label \
-                             (must be non-empty ASCII alphanumerics, '_' or '-')"
-                        );
-                    }
-                }
-            }
-
-            if let Some(devices) = &usage.devices {
-                for label in devices.keys() {
-                    if !is_valid_label(label) {
-                        bail!(
-                            "usage.devices key {label:?} is not a valid label \
-                             (must be non-empty ASCII alphanumerics, '_' or '-')"
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -218,7 +148,7 @@ mod tests {
 
     #[test]
     fn dwell_click_allow_parses() {
-        let config: Config = toml::from_str(
+        let config: ConfigFile = toml::from_str(
             r#"
             [dwell_click]
             allow = true
@@ -236,7 +166,7 @@ mod tests {
 
     #[test]
     fn dwell_click_allow_defaults_to_false() {
-        let config: Config = toml::from_str("").expect("empty config should parse");
+        let config: ConfigFile = toml::from_str("").expect("empty config should parse");
 
         assert!(
             !config
@@ -247,8 +177,13 @@ mod tests {
     }
 
     #[test]
+    fn load_uses_default_path_when_path_is_none() {
+        assert_eq!(load_path(None), Path::new(DEFAULT_CONFIG_PATH));
+    }
+
+    #[test]
     fn devices_include_parses_as_map() {
-        let config: Config = toml::from_str(
+        let config: ConfigFile = toml::from_str(
             r#"
             [devices.include.keyboard]
             serial = "Chicony_USB_Keyboard"
@@ -267,81 +202,11 @@ mod tests {
         assert_eq!(include.len(), 2);
         assert!(include.contains_key("keyboard"));
         assert!(include.contains_key("mouse"));
-        config.validate().expect("config should validate");
-    }
-
-    #[test]
-    fn empty_matcher_rejected() {
-        let config: Config = toml::from_str(
-            r#"
-            [devices.include.keyboard]
-            "#,
-        )
-        .expect("config should parse");
-
-        let err = config.validate().expect_err("empty matcher must error");
-        assert!(
-            format!("{err}").contains("devices.include.keyboard"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn invalid_label_rejected() {
-        let config: Config = toml::from_str(
-            r#"
-            [devices.include."bad label"]
-            serial = "x"
-            "#,
-        )
-        .expect("config should parse");
-
-        let err = config.validate().expect_err("invalid label must error");
-        assert!(
-            format!("{err}").contains("not a valid label"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn empty_label_rejected() {
-        let config: Config = toml::from_str(
-            r#"
-            [devices.include.""]
-            serial = "x"
-            "#,
-        )
-        .expect("config should parse");
-
-        let err = config.validate().expect_err("empty label must error");
-        assert!(
-            format!("{err}").contains("not a valid label"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn auto_detect_off_with_no_includes_rejected() {
-        let config: Config = toml::from_str(
-            r#"
-            [devices]
-            auto_detect = false
-            "#,
-        )
-        .expect("config should parse");
-
-        let err = config
-            .validate()
-            .expect_err("must reject when nothing would be monitored");
-        assert!(
-            format!("{err}").contains("auto_detect is false"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]
     fn duplicate_label_rejected_by_toml() {
-        let result: Result<Config, _> = toml::from_str(
+        let result: Result<ConfigFile, _> = toml::from_str(
             r#"
             [devices.include.keyboard]
             serial = "a"
@@ -355,7 +220,7 @@ mod tests {
 
     #[test]
     fn usage_devices_config_parses() {
-        let config: Config = toml::from_str(
+        let config: ConfigFile = toml::from_str(
             r#"
             [usage]
             default_pointer_hand = "right"
@@ -406,12 +271,11 @@ mod tests {
                 .as_ref()
                 .is_some_and(|devices| devices.contains_key("layer_pad"))
         );
-        config.validate().expect("config should validate");
     }
 
     #[test]
     fn old_usage_key_hand_config_is_rejected() {
-        let result: Result<Config, _> = toml::from_str(
+        let result: Result<ConfigFile, _> = toml::from_str(
             r#"
             [usage]
             default_pointer_hand = "right"
@@ -426,7 +290,7 @@ mod tests {
 
     #[test]
     fn usage_without_default_pointer_hand_is_rejected() {
-        let result: Result<Config, _> = toml::from_str(
+        let result: Result<ConfigFile, _> = toml::from_str(
             r#"
             [usage]
             exclude = []
@@ -441,7 +305,7 @@ mod tests {
 
     #[test]
     fn usage_devices_still_require_default_pointer_hand() {
-        let result: Result<Config, _> = toml::from_str(
+        let result: Result<ConfigFile, _> = toml::from_str(
             r#"
             [devices.include.left_mouse]
             name = "Left Mouse"
@@ -454,28 +318,6 @@ mod tests {
         assert!(
             result.is_err(),
             "per-device hands must not make default_pointer_hand optional"
-        );
-    }
-
-    #[test]
-    fn usage_device_label_syntax_is_validated() {
-        let config: Config = toml::from_str(
-            r#"
-            [usage]
-            default_pointer_hand = "right"
-
-            [usage.devices."bad label"]
-            key_profile = "none"
-            "#,
-        )
-        .expect("config should parse");
-
-        let err = config
-            .validate()
-            .expect_err("invalid usage device label should error");
-        assert!(
-            format!("{err}").contains("usage.devices"),
-            "unexpected error: {err}"
         );
     }
 }
