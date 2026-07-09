@@ -1,6 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+mod config_schema;
 mod fdr;
 
 fn main() {
@@ -13,12 +14,17 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
-        return Err("usage: cargo xtask generate-fdr-schema [--check]".to_owned());
+        return Err(
+            "usage: cargo xtask <generate-fdr-schema|generate-config-schema|generate-config-docs> [--check]"
+                .to_owned(),
+        );
     };
     let root = workspace_root()?;
 
     match command.as_str() {
         "generate-fdr-schema" => fdr::generate_schema(&root, args),
+        "generate-config-schema" => config_schema::generate_config_schema(&root, args),
+        "generate-config-docs" => config_schema::generate_config_docs(&root, args),
         _ => Err(format!("unknown xtask command {command:?}")),
     }
 }

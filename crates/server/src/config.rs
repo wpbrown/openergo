@@ -1,4 +1,5 @@
 use rootcause::prelude::*;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,12 +10,17 @@ fn load_path(path: Option<&Path>) -> &Path {
     path.unwrap_or_else(|| Path::new(DEFAULT_CONFIG_PATH))
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// Server TOML configuration file.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
+    /// Unix domain socket settings for client connections.
     pub socket: Option<SocketConfig>,
+    /// Controls whether clients may enable dwell click behavior.
     pub dwell_click: Option<DwellClickConfig>,
+    /// Device discovery and filtering settings.
     pub devices: Option<DevicesConfig>,
+    /// Device usage classification settings.
     pub usage: Option<UsageConfig>,
 }
 
@@ -23,7 +29,7 @@ pub struct ConfigArgs {
     pub socket_user: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SocketConfig {
     /// Path to the Unix domain socket. Defaults to `/run/openergo.sock`.
@@ -35,7 +41,7 @@ pub struct SocketConfig {
     pub group: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DwellClickConfig {
     /// Whether clients are allowed to configure dwell click behavior.
@@ -48,7 +54,7 @@ impl DwellClickConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DevicesConfig {
     /// Whether to auto-detect keyboards, mice, and touchpads. Defaults to `true`.
@@ -68,51 +74,73 @@ impl DevicesConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UsageConfig {
     /// Friendly device labels to ignore when computing usage. Each label must
     /// already be configured under `[devices.include]` or `[devices.exclude]`.
     pub exclude: Option<Vec<String>>,
+    /// Default hand used for pointer devices that do not have an explicit
+    /// per-device usage configuration.
     pub default_pointer_hand: HandConfigValue,
+    /// Per-device usage classification. Keys must reference labels configured
+    /// under `[devices.include]` or `[devices.exclude]`.
     pub devices: Option<HashMap<String, DeviceUsageConfig>>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceUsageConfig {
+    /// Hand that operates this device. For pointer devices this controls click,
+    /// drag, and scroll classification; for keyboards it can also select a
+    /// derived all-left or all-right key profile when `key_profile` is omitted.
     pub hand: Option<HandConfigValue>,
+    /// Keyboard profile used to classify key usage for this device.
     pub key_profile: Option<KeyProfileConfigValue>,
+    /// Per-key classification overrides keyed by evdev key code name, for
+    /// example `KEY_SPACE`.
     pub key_overrides: Option<HashMap<String, KeyOverrideValue>>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+/// Physical hand used for pointer or keyboard classification.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HandConfigValue {
+    /// Left hand.
     Left,
+    /// Right hand.
     Right,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+/// Keyboard profile used to classify key codes by hand.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyProfileConfigValue {
+    /// ANSI QWERTY layout split between left and right hands.
     AnsiQwerty,
+    /// Do not classify keys from this device.
     None,
+    /// Classify every key as left-handed.
     AllLeft,
+    /// Classify every key as right-handed.
     AllRight,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+/// Classification override for a single key code.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyOverrideValue {
+    /// Classify the key as left-handed.
     Left,
+    /// Classify the key as right-handed.
     Right,
+    /// Classify the key as neither left nor right hand.
     Unclassified,
 }
 
 /// Matches a device by path and/or udev properties. All specified fields must
 /// match (AND logic). At least one field must be set.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceMatcher {
     /// Device path: matched against DEVNAME and DEVLINKS.
