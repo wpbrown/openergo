@@ -3,7 +3,6 @@ pub mod limit;
 pub mod utilization;
 
 pub use calculator::CreditCalculator;
-pub use calculator::config::CreditCalculatorConfig;
 use serde::{Deserialize, Serialize};
 pub use shared::model::Credit;
 use std::ops::{Add, AddAssign};

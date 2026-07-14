@@ -45,8 +45,7 @@ impl Default for EndpointLabelStore {
 /// Direction of an endpoint relative to the application: `In` means the
 /// device produces values, `Out` means the application sends values to
 /// the device, `InOut` means both.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Direction {
     #[default]
     In,
@@ -80,7 +79,7 @@ pub trait EndpointConfig {
 }
 
 /// Read-only catalog mapping every configured endpoint label to its
-/// transport-specific configuration `T`. Built by `Config::build_catalog`
+/// transport-specific configuration `T`. Built by the endpoints app module
 /// and held on the application stack; the label store is leaked
 /// separately so resolved labels can be `&'static str`.
 pub struct EndpointCatalog<T> {

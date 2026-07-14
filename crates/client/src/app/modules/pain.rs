@@ -1,4 +1,3 @@
-use super::super::config;
 use crate::integration::{AnalogIn, Binder, EndpointConfig, EndpointLabel, EndpointLabelStore};
 use crate::pain::{
     self, PainBias, PainCatalog, PainLabel, PainLabelStore, PainLiveSource, PainProducer,
@@ -7,6 +6,16 @@ use crate::pain::{
 use rootcause::prelude::*;
 use shared::oe_spawn;
 use shared::spawn::JoinHandle;
+
+pub struct Config {
+    pub sources: Vec<SourceConfig>,
+}
+
+pub struct SourceConfig {
+    pub name: String,
+    pub source: String,
+    pub bias: PainBias,
+}
 
 /// Pre-startup view of the `[pain]` configuration: the resolved
 /// catalog (label store + per-label bias) plus the per-source
@@ -67,7 +76,7 @@ impl PainModule {
 /// already-populated label store from the endpoint catalog); an
 /// unknown control is reported as a startup error.
 pub fn init(
-    cfg: Option<config::PainConfig>,
+    cfg: Option<Config>,
     endpoint_labels: &'static EndpointLabelStore,
 ) -> Result<PainModule, Report> {
     let mut pain_label_store = PainLabelStore::new();
@@ -76,16 +85,11 @@ pub fn init(
     if let Some(cfg) = cfg {
         specs.reserve(cfg.sources.len());
         sources.reserve(cfg.sources.len());
-        for (name, source) in cfg.sources {
-            let bias = match source.bias {
-                config::PainBiasConfig::Left => PainBias::Left,
-                config::PainBiasConfig::Right => PainBias::Right,
-                config::PainBiasConfig::Center => PainBias::Center,
-            };
-            let source_label = endpoint_labels.get(&source.source).ok_or_else(|| {
+        for SourceConfig { name, source, bias } in cfg.sources {
+            let source_label = endpoint_labels.get(&source).ok_or_else(|| {
                 report!(
                     "pain source '{name}' references unknown control '{}'",
-                    source.source
+                    source
                 )
             })?;
             let label = pain_label_store.get_or_intern(&name);

@@ -1,8 +1,5 @@
-use super::super::config;
 use crate::credit::CreditCalculator;
-use crate::credit::calculator::config::{
-    CreditCalculatorConfig, CreditCostConfig, CreditRateBoostConfig, GlobalCreditBoostConfig,
-};
+use crate::credit::calculator::config::CreditCalculatorConfig;
 use crate::credit::limit::{self, CreditLimitProducer, CreditLimitSource, CreditLimitState};
 use crate::credit::utilization::{
     self, CreditEventSource, CreditUtilizationSource, CreditUtilizationState,
@@ -15,6 +12,24 @@ use shared::model::CreditLimit;
 use shared::oe_spawn;
 use shared::shutdown::ShutdownSource;
 use shared::spawn::JoinHandle;
+
+pub struct Config {
+    pub limits: LimitsConfig,
+    pub utilization: Option<UtilizationConfig>,
+    pub calculator: CreditCalculatorConfig,
+}
+
+pub struct LimitsConfig {
+    pub rest: f64,
+    pub breaks: f64,
+    pub day: f64,
+}
+
+pub struct UtilizationConfig {
+    pub rest_sink: Option<String>,
+    pub breaks_sink: Option<String>,
+    pub day_sink: Option<String>,
+}
 
 /// The three optional [`AnalogOutProducer`] sinks bound from
 /// `[credit.utilization]`. Handed to the
@@ -34,7 +49,7 @@ impl CreditSinks {
 }
 
 pub struct CreditModule {
-    utilization_cfg: Option<config::CreditUtilizationConfig>,
+    utilization_cfg: Option<UtilizationConfig>,
     // Kept alive for the lifetime of the process so the limit watch
     // never closes. Reserved for the future pain-driven tuner.
     limit_producer: CreditLimitProducer,
@@ -159,19 +174,14 @@ impl CreditRuntime {
 /// Build the [`CreditModule`]. Seeds the limits from `limits_cfg`
 /// (falling back to the per-field defaults), creates the limit watch,
 /// stores the optional sink config for later binding, and returns the
-/// configured [`CreditCalculator`] for the server link. The
-/// notifications half of `[credit]` is handled by
-/// [`super::notifications::init`].
+/// configured [`CreditCalculator`] for the server link.
 pub fn init(
-    limits_cfg: Option<config::CreditLimitsConfig>,
-    utilization_cfg: Option<config::CreditUtilizationConfig>,
-    costs_cfg: Option<CreditCostConfig>,
-    rate_boost_cfg: Option<CreditRateBoostConfig>,
-    global_boost_cfg: Option<GlobalCreditBoostConfig>,
+    Config {
+        limits: limits_cfg,
+        utilization: utilization_cfg,
+        calculator: calculator_config,
+    }: Config,
 ) -> (CreditModule, CreditCalculator) {
-    let limits_cfg = limits_cfg.unwrap_or_default();
-    let calculator_config =
-        CreditCalculatorConfig::from_parts(costs_cfg, rate_boost_cfg, global_boost_cfg);
     let initial_limits = CreditLimitState {
         rest: CreditLimit::new(limits_cfg.rest),
         breaks: CreditLimit::new(limits_cfg.breaks),

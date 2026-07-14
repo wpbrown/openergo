@@ -4,6 +4,7 @@ use shared::shutdown::ShutdownSource;
 
 mod config;
 mod graph_driver;
+mod instantiate;
 mod modules;
 
 pub async fn run(
@@ -13,23 +14,31 @@ pub async fn run(
         config: config_path,
     }: Args,
 ) -> Result<(), Report> {
-    // config: load all config
-    let config::Config {
-        telemetry,
+    let file_config =
+        config::ConfigFile::load(config_path.as_deref()).context("Failed to load configuration")?;
+    let instantiate::RuntimeConfig {
+        server_socket_path,
+        client_socket_path,
+        telemetry_report_usage,
         devices,
         pain,
+        pain_check,
         credit,
-        rest,
-        learning,
-    } = modules::config::run(config_path)?;
-    let learning_cfg = learning.unwrap_or_default();
+        credit_notifications,
+        require_no_activity,
+        data_recorder,
+    } = instantiate::instantiate(
+        config::ConfigArgs {
+            server_socket_path,
+            client_socket_path,
+        },
+        file_config,
+    )
+    .context("Failed to instantiate configuration")?;
 
     // telemetry
-    let (telemetry_enabled, telemetry_report_usage) = telemetry
-        .map(|t| (t.enabled(), t.report_usage()))
-        .unwrap_or_default();
-    let telemetry_module = if telemetry_enabled {
-        Some(modules::telemetry::init(telemetry_report_usage)?)
+    let telemetry_module = if let Some(report_usage) = telemetry_report_usage {
+        Some(modules::telemetry::init(report_usage)?)
     } else {
         tracing::info!("opentelemetry not enabled by config");
         None
@@ -37,11 +46,8 @@ pub async fn run(
 
     // init endpoints and pain catalogs
     let endpoints_catalog = modules::endpoints::init(devices);
-    let (pain_cfg, pain_check_cfg) = pain
-        .map(|pain| (Some(pain.settings), pain.check))
-        .unwrap_or_default();
-    let pain_module = modules::pain::init(pain_cfg, endpoints_catalog.labels())?;
-    let pain_check_module = modules::pain_check::init(pain_check_cfg, endpoints_catalog.labels())?;
+    let pain_module = modules::pain::init(pain, endpoints_catalog.labels())?;
+    let pain_check_module = modules::pain_check::init(pain_check, endpoints_catalog.labels())?;
 
     // init persistence: load all data
     let (persistence_module, snapshot) =
@@ -61,21 +67,7 @@ pub async fn run(
     let shutdown = ShutdownSource::new()?;
 
     // credit utilization
-    let config::CreditConfig {
-        limits: credit_limits_cfg,
-        utilization: credit_util_cfg,
-        notifications: credit_notif_cfg,
-        costs: credit_costs_cfg,
-        rate_boost: credit_rate_boost_cfg,
-        global_boost: credit_global_boost_cfg,
-    } = credit.unwrap_or_default();
-    let (credit_module, credit_calculator) = modules::credit::init(
-        credit_limits_cfg,
-        credit_util_cfg,
-        credit_costs_cfg,
-        credit_rate_boost_cfg,
-        credit_global_boost_cfg,
-    );
+    let (credit_module, credit_calculator) = modules::credit::init(credit);
 
     // transports
     let mut binder = crate::integration::Binder::new(endpoints_catalog);
@@ -90,10 +82,8 @@ pub async fn run(
 
     // activity tracker
     let (activity_producer, activity_module) = modules::activity::init(initial_activity);
-    let activity_rx = rest
-        .unwrap_or_default()
-        .require_no_activity
-        .then(|| activity_module.signal_source().subscribe_forward());
+    let activity_rx =
+        require_no_activity.then(|| activity_module.signal_source().subscribe_forward());
 
     // usage tracking
     let usage_runtime = modules::usage::run(
@@ -134,14 +124,14 @@ pub async fn run(
     });
 
     // notifications
-    let notification_task = if let Some(cfg) = credit_notif_cfg {
+    let notification_task = if let Some(cfg) = credit_notifications {
         modules::notifications::run(cfg, credit_runtime.event_source().subscribe())
     } else {
         None
     };
 
     // flight data recorder
-    let fdr_task = learning_cfg.data_recorder.then(|| {
+    let fdr_task = data_recorder.then(|| {
         modules::fdr::run(
             app_state_identity,
             usage_runtime.sources().subscribe_forward(),

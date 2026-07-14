@@ -1,4 +1,3 @@
-pub mod config;
 pub mod credit;
 pub mod endpoints;
 pub mod ipc_server;
@@ -49,7 +48,6 @@ pub mod fdr {
 }
 
 pub mod notifications {
-    use super::super::config;
     use crate::credit::utilization::CreditEventConsumer;
     use crate::notifications::{self, NotificationSettings};
     use futures::FutureExt;
@@ -58,10 +56,9 @@ pub mod notifications {
     use shared::spawn::JoinHandle;
 
     pub fn run(
-        cfg: config::CreditNotificationsConfig,
+        settings: NotificationSettings,
         events: CreditEventConsumer,
     ) -> Option<JoinHandle<Result<(), Report>>> {
-        let settings = NotificationSettings::new(cfg.notifications, cfg.sounds);
         if !settings.any() {
             return None;
         }

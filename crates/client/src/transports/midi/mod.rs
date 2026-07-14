@@ -30,10 +30,8 @@ const STARTUP_DRAIN_DELAY: Duration = Duration::from_millis(25);
 /// should simply ignore it.
 const FADER_REQUEST_SYSEX: &[u8] = &[0xF0, 0x7D, 0x01, 0xF7];
 
-/// MIDI message type. Shared between [`crate::app`]'s config parsing
-/// and the MIDI transport (which dispatches on it at runtime).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Runtime MIDI message type used by the transport driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MidiMessage {
     Cc,
     Note,

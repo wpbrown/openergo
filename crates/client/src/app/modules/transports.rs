@@ -1,4 +1,4 @@
-use super::super::config;
+use super::endpoints::{MidiTransportConfig, TransportConfigs};
 use crate::integration::{self, EndpointBinding, EndpointLabelStore};
 use crate::transports;
 use itertools::Itertools;
@@ -34,16 +34,16 @@ impl TransportsModule {
 /// bucket and arm here.
 pub fn init(
     label_store: &'static EndpointLabelStore,
-    bound_endpoints: Vec<EndpointBinding<config::TransportConfigs>>,
+    bound_endpoints: Vec<EndpointBinding<TransportConfigs>>,
 ) -> TransportsModule {
     let mut midi_bound: Vec<(
         integration::EndpointLabel,
-        config::MidiTransportConfig,
+        MidiTransportConfig,
         integration::EndpointIo,
     )> = Vec::with_capacity(bound_endpoints.len());
     for EndpointBinding { label, config, io } in bound_endpoints {
         match config {
-            config::TransportConfigs::Midi(midi) => midi_bound.push((label, midi, io)),
+            TransportConfigs::Midi(midi) => midi_bound.push((label, midi, io)),
         }
     }
     TransportsModule {
@@ -61,7 +61,7 @@ fn build_midi_devices(
     label_store: &'static EndpointLabelStore,
     bound: Vec<(
         integration::EndpointLabel,
-        config::MidiTransportConfig,
+        MidiTransportConfig,
         integration::EndpointIo,
     )>,
 ) -> Vec<transports::midi::MidiDeviceConfig> {
@@ -74,7 +74,7 @@ fn build_midi_devices(
             let controls: Vec<transports::midi::MidiControlDefinition> = entries
                 .into_iter()
                 .map(|(label, midi, endpoint)| {
-                    let config::MidiTransportConfig { device: _, control } = midi;
+                    let MidiTransportConfig { device: _, control } = midi;
                     transports::midi::MidiControlDefinition {
                         label: label_store.resolve(label),
                         message: control.message,

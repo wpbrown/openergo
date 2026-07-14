@@ -1,4 +1,3 @@
-use super::super::config;
 use crate::activity::ActivityStateConsumer;
 use crate::credit::utilization::CreditEventConsumer;
 use crate::integration::{
@@ -8,6 +7,11 @@ use crate::pain::{self, PainConsumer};
 use rootcause::prelude::*;
 use shared::oe_spawn;
 use shared::spawn::JoinHandle;
+
+pub struct Config {
+    pub indicator: Option<String>,
+    pub acknowledge: Option<String>,
+}
 
 pub struct PainCheckModule {
     indicator: Option<EndpointLabel>,
@@ -56,17 +60,16 @@ pub struct PainCheckBindings {
 }
 
 pub fn init(
-    cfg: Option<config::PainCheckConfig>,
+    cfg: Option<Config>,
     endpoint_labels: &'static EndpointLabelStore,
 ) -> Result<Option<PainCheckModule>, Report> {
     let Some(cfg) = cfg else {
         return Ok(None);
     };
 
-    let config::PainCheckConfig {
+    let Config {
         indicator,
         acknowledge,
-        notifications: _,
     } = cfg;
 
     let indicator = indicator
