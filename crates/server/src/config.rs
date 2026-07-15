@@ -89,6 +89,7 @@ pub struct UsageConfig {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[schemars(title = "DeviceUsage")]
 #[serde(deny_unknown_fields)]
 pub struct DeviceUsageConfig {
     /// Hand that operates this device. For pointer devices this controls click,
@@ -104,6 +105,7 @@ pub struct DeviceUsageConfig {
 
 /// Physical hand used for pointer or keyboard classification.
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "Hand")]
 #[serde(rename_all = "snake_case")]
 pub enum HandConfigValue {
     /// Left hand.
@@ -114,6 +116,7 @@ pub enum HandConfigValue {
 
 /// Keyboard profile used to classify key codes by hand.
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "KeyProfile")]
 #[serde(rename_all = "snake_case")]
 pub enum KeyProfileConfigValue {
     /// ANSI QWERTY layout split between left and right hands.
@@ -128,6 +131,7 @@ pub enum KeyProfileConfigValue {
 
 /// Classification override for a single key code.
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "HandClassification")]
 #[serde(rename_all = "snake_case")]
 pub enum KeyOverrideValue {
     /// Classify the key as left-handed.
@@ -141,6 +145,7 @@ pub enum KeyOverrideValue {
 /// Matches a device by path and/or udev properties. All specified fields must
 /// match (AND logic). At least one field must be set.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(title = "DeviceFilter")]
 #[serde(deny_unknown_fields)]
 pub struct DeviceMatcher {
     /// Device path: matched against DEVNAME and DEVLINKS.

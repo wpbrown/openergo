@@ -15,7 +15,7 @@ fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
         return Err(
-            "usage: cargo xtask <generate-fdr-schema|generate-config-schema|generate-config-docs> [--check]"
+            "usage:\n  cargo xtask generate-fdr-schema [--check]\n  cargo xtask generate-config-schema [--check] [--target <server|client>]\n  cargo xtask generate-config-docs [--check]"
                 .to_owned(),
         );
     };

@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConfigFile",
+  "description": "Server TOML configuration file.",
+  "type": "object",
+  "properties": {
+    "socket": {
+      "description": "Unix domain socket settings for client connections.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SocketConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "dwell_click": {
+      "description": "Controls whether clients may enable dwell click behavior.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DwellClickConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "devices": {
+      "description": "Device discovery and filtering settings.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DevicesConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "usage": {
+      "description": "Device usage classification settings.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UsageConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "SocketConfig": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Path to the Unix domain socket. Defaults to `/run/openergo.sock`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "User (name or UID) to own the socket at the configured path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group": {
+          "description": "Group (name or GID) to own the socket at the configured path. If set\nwith `user`, overrides the user's primary group.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DwellClickConfig": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Whether clients are allowed to configure dwell click behavior.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DevicesConfig": {
+      "type": "object",
+      "properties": {
+        "auto_detect": {
+          "description": "Whether to auto-detect keyboards, mice, and touchpads. Defaults to `true`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "include": {
+          "description": "Devices to include (in addition to auto-detected, or as the sole set if\n`auto_detect` is false). Keyed by a friendly label used in logs.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/DeviceMatcher"
+          }
+        },
+        "exclude": {
+          "description": "Devices to exclude from monitoring. Takes precedence over both\nauto-detected and included devices. Keyed by a friendly label used in\nlogs.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/DeviceMatcher"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "DeviceMatcher": {
+      "title": "DeviceFilter",
+      "description": "Matches a device by path and/or udev properties. All specified fields must\nmatch (AND logic). At least one field must be set.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Device path: matched against DEVNAME and DEVLINKS.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Matched against the evdev device name (udev `NAME` property).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Matched against udev `ID_MODEL`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_id": {
+          "description": "Matched against udev `ID_MODEL_ID`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vendor_id": {
+          "description": "Matched against udev `ID_VENDOR_ID`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serial": {
+          "description": "Matched against udev `ID_SERIAL`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bus": {
+          "description": "Matched against udev `ID_BUS`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "UsageConfig": {
+      "type": "object",
+      "properties": {
+        "exclude": {
+          "description": "Friendly device labels to ignore when computing usage. Each label must\nalready be configured under `[devices.include]` or `[devices.exclude]`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "default_pointer_hand": {
+          "description": "Default hand used for pointer devices that do not have an explicit\nper-device usage configuration.",
+          "$ref": "#/$defs/HandConfigValue"
+        },
+        "devices": {
+          "description": "Per-device usage classification. Keys must reference labels configured\nunder `[devices.include]` or `[devices.exclude]`.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/DeviceUsageConfig"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "default_pointer_hand"
+      ]
+    },
+    "HandConfigValue": {
+      "title": "Hand",
+      "description": "Physical hand used for pointer or keyboard classification.",
+      "oneOf": [
+        {
+          "description": "Left hand.",
+          "type": "string",
+          "const": "left"
+        },
+        {
+          "description": "Right hand.",
+          "type": "string",
+          "const": "right"
+        }
+      ]
+    },
+    "DeviceUsageConfig": {
+      "title": "DeviceUsage",
+      "type": "object",
+      "properties": {
+        "hand": {
+          "description": "Hand that operates this device. For pointer devices this controls click,\ndrag, and scroll classification; for keyboards it can also select a\nderived all-left or all-right key profile when `key_profile` is omitted.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HandConfigValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "key_profile": {
+          "description": "Keyboard profile used to classify key usage for this device.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KeyProfileConfigValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "key_overrides": {
+          "description": "Per-key classification overrides keyed by evdev key code name, for\nexample `KEY_SPACE`.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/KeyOverrideValue"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "KeyProfileConfigValue": {
+      "title": "KeyProfile",
+      "description": "Keyboard profile used to classify key codes by hand.",
+      "oneOf": [
+        {
+          "description": "ANSI QWERTY layout split between left and right hands.",
+          "type": "string",
+          "const": "ansi_qwerty"
+        },
+        {
+          "description": "Do not classify keys from this device.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Classify every key as left-handed.",
+          "type": "string",
+          "const": "all_left"
+        },
+        {
+          "description": "Classify every key as right-handed.",
+          "type": "string",
+          "const": "all_right"
+        }
+      ]
+    },
+    "KeyOverrideValue": {
+      "title": "HandClassification",
+      "description": "Classification override for a single key code.",
+      "oneOf": [
+        {
+          "description": "Classify the key as left-handed.",
+          "type": "string",
+          "const": "left"
+        },
+        {
+          "description": "Classify the key as right-handed.",
+          "type": "string",
+          "const": "right"
+        },
+        {
+          "description": "Classify the key as neither left nor right hand.",
+          "type": "string",
+          "const": "unclassified"
+        }
+      ]
+    }
+  }
+}

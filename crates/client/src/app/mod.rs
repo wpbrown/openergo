@@ -1,21 +1,18 @@
-use crate::Args;
 use rootcause::prelude::*;
 use shared::shutdown::ShutdownSource;
+use std::path::Path;
 
-mod config;
+pub mod config;
 mod graph_driver;
 mod instantiate;
 mod modules;
 
 pub async fn run(
-    Args {
-        server_socket_path,
-        client_socket_path,
-        config: config_path,
-    }: Args,
+    config_args: config::ConfigArgs,
+    config_path: Option<&Path>,
 ) -> Result<(), Report> {
     let file_config =
-        config::ConfigFile::load(config_path.as_deref()).context("Failed to load configuration")?;
+        config::ConfigFile::load(config_path).context("Failed to load configuration")?;
     let instantiate::RuntimeConfig {
         server_socket_path,
         client_socket_path,
@@ -27,14 +24,8 @@ pub async fn run(
         credit_notifications,
         require_no_activity,
         data_recorder,
-    } = instantiate::instantiate(
-        config::ConfigArgs {
-            server_socket_path,
-            client_socket_path,
-        },
-        file_config,
-    )
-    .context("Failed to instantiate configuration")?;
+    } = instantiate::instantiate(config_args, file_config)
+        .context("Failed to instantiate configuration")?;
 
     // telemetry
     let telemetry_module = if let Some(report_usage) = telemetry_report_usage {

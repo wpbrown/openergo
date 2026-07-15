@@ -18,7 +18,7 @@ libc = "0.2"
 libsystemd = "0.7"
 postcard = { version = "1", features = ["alloc", "use-std"] }
 rootcause = "0.12"
-schemars = { version = "1", features = ["derive"] }
+schemars = { version = "1", features = ["derive", "preserve_order"] }
 shared = { path = "../shared", features = ["systemd"] }
 serde = { version = "1", features = ["derive"] }
 smallvec = { version = "1", features = ["const_generics"] }

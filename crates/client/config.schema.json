@@ -1,0 +1,766 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConfigFile",
+  "description": "Client TOML configuration file.",
+  "type": "object",
+  "properties": {
+    "telemetry": {
+      "description": "OpenTelemetry usage reporting settings.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TelemetryConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "devices": {
+      "description": "External input and output devices, keyed by a unique device name.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/DeviceConfig"
+      }
+    },
+    "pain": {
+      "description": "Pain reporting sources and pain-check settings.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PainConfigGroup"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "credit": {
+      "description": "Usage credit limits, costs, boosts, and notifications.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CreditConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "rest": {
+      "description": "Rest detection settings.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RestConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "learning": {
+      "description": "Data collection settings for future learning features.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LearningConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "TelemetryConfig": {
+      "type": "object",
+      "properties": {
+        "report_usage": {
+          "description": "Whether to report usage as OpenTelemetry metrics. Defaults to `false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DeviceConfig": {
+      "title": "Device",
+      "description": "An external device used as a source or sink for client integrations.",
+      "oneOf": [
+        {
+          "description": "A MIDI device selected by port, client, or both.",
+          "type": "object",
+          "properties": {
+            "port": {
+              "description": "MIDI port name to match. At least one of `port` and `client` must be set.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "client": {
+              "description": "MIDI client name to match. At least one of `port` and `client` must be\nset.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "controls": {
+              "description": "MIDI controls exposed by this device, keyed by a globally unique control\nlabel.",
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/MidiControlConfig"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "midi"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "MidiControlConfig": {
+      "title": "MidiControl",
+      "type": "object",
+      "properties": {
+        "message": {
+          "description": "MIDI message kind handled by this control.",
+          "$ref": "#/$defs/MidiMessage"
+        },
+        "channel": {
+          "description": "Zero-based MIDI channel in the range 0 through 15.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "number": {
+          "description": "MIDI controller or note number in the range 0 through 127.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "direction": {
+          "description": "Whether the control is an input, output, or both. Defaults to `\"in\"`.",
+          "$ref": "#/$defs/Direction"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "message",
+        "channel",
+        "number"
+      ]
+    },
+    "MidiMessage": {
+      "title": "MidiMessage",
+      "description": "MIDI message kind used by a control.",
+      "oneOf": [
+        {
+          "description": "MIDI control change message.",
+          "type": "string",
+          "const": "cc"
+        },
+        {
+          "description": "MIDI note message. Note controls support input only.",
+          "type": "string",
+          "const": "note"
+        }
+      ]
+    },
+    "Direction": {
+      "title": "Direction",
+      "description": "Direction in which an integration control may be used.",
+      "oneOf": [
+        {
+          "description": "Input from the external device into Openergo.",
+          "type": "string",
+          "const": "in"
+        },
+        {
+          "description": "Output from Openergo to the external device.",
+          "type": "string",
+          "const": "out"
+        },
+        {
+          "description": "Both input and output.",
+          "type": "string",
+          "const": "in_out"
+        }
+      ]
+    },
+    "PainConfigGroup": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "description": "Pain-reporting inputs, keyed by a unique pain source label.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/PainSourceConfig"
+          }
+        },
+        "check": {
+          "description": "Interactive pain-check controls and notifications.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PainCheckConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PainSourceConfig": {
+      "title": "PainSource",
+      "type": "object",
+      "properties": {
+        "source": {
+          "description": "Global control label supplying pain values. The control must allow input.",
+          "type": "string"
+        },
+        "bias": {
+          "description": "Body-side bias associated with values from this source.",
+          "$ref": "#/$defs/PainBiasConfig"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "bias"
+      ]
+    },
+    "PainBiasConfig": {
+      "title": "Bias",
+      "description": "Body-side bias associated with a pain source.",
+      "oneOf": [
+        {
+          "description": "Left side of the body.",
+          "type": "string",
+          "const": "left"
+        },
+        {
+          "description": "Right side of the body.",
+          "type": "string",
+          "const": "right"
+        },
+        {
+          "description": "No left or right bias.",
+          "type": "string",
+          "const": "center"
+        }
+      ]
+    },
+    "PainCheckConfig": {
+      "type": "object",
+      "properties": {
+        "indicator": {
+          "description": "Output control used to indicate that a pain check is active.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "acknowledge": {
+          "description": "Input control used to acknowledge a pain check.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notifications": {
+          "description": "Desktop notification and sound settings for pain checks.",
+          "$ref": "#/$defs/PainCheckNotificationsConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PainCheckNotificationsConfig": {
+      "type": "object",
+      "properties": {
+        "notifications": {
+          "description": "Whether to show desktop notifications. Defaults to `false`.",
+          "type": "boolean",
+          "default": false
+        },
+        "sounds": {
+          "description": "Whether to play notification sounds. Defaults to `false`.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "CreditConfig": {
+      "type": "object",
+      "properties": {
+        "limits": {
+          "description": "Credit thresholds for rest breaks, longer breaks, and daily usage.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreditLimitsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "utilization": {
+          "description": "Output controls that display current credit utilization.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreditUtilizationConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "notifications": {
+          "description": "Credit-related desktop notification and sound settings.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreditNotificationsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "costs": {
+          "description": "Base credit costs for classified usage events.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreditCostConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate_boost": {
+          "description": "Per-activity multipliers for sustained high activity rates.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreditRateBoostConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "global_boost": {
+          "description": "Multiplier for a sustained high total credit-consumption rate.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GlobalCreditBoostConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CreditLimitsConfig": {
+      "type": "object",
+      "properties": {
+        "rest": {
+          "description": "Credit limit before suggesting a micro-rest. Defaults to 800.",
+          "type": "number",
+          "format": "double",
+          "default": 800.0
+        },
+        "break": {
+          "description": "Credit limit before suggesting a longer break. Defaults to 2000.",
+          "type": "number",
+          "format": "double",
+          "default": 2000.0
+        },
+        "day": {
+          "description": "Daily credit limit. Defaults to 30000.",
+          "type": "number",
+          "format": "double",
+          "default": 30000.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "CreditUtilizationConfig": {
+      "type": "object",
+      "properties": {
+        "rest_sink": {
+          "description": "Output control that receives rest-credit utilization.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "breaks_sink": {
+          "description": "Output control that receives break-credit utilization.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "day_sink": {
+          "description": "Output control that receives daily-credit utilization.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CreditNotificationsConfig": {
+      "type": "object",
+      "properties": {
+        "notifications": {
+          "description": "Whether to show desktop notifications for credit events. Defaults to\n`false`.",
+          "type": "boolean",
+          "default": false
+        },
+        "sounds": {
+          "description": "Whether to play sounds for credit events. Defaults to `false`.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "CreditCostConfig": {
+      "type": "object",
+      "properties": {
+        "hand": {
+          "description": "Base costs shared by both hands.",
+          "$ref": "#/$defs/PartialHandCostConfig"
+        },
+        "left": {
+          "description": "Overrides to base costs for left-handed usage.",
+          "$ref": "#/$defs/PartialHandCostConfig"
+        },
+        "right": {
+          "description": "Overrides to base costs for right-handed usage.",
+          "$ref": "#/$defs/PartialHandCostConfig"
+        },
+        "unclassified": {
+          "description": "Costs for usage that cannot be assigned to either hand.",
+          "$ref": "#/$defs/UnclassifiedCostConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PartialHandCostConfig": {
+      "title": "HandCosts",
+      "type": "object",
+      "properties": {
+        "click": {
+          "description": "Credit cost per click.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "drag_per_sec": {
+          "description": "Credit cost per second of dragging.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "key": {
+          "description": "Credit cost per key press.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "scroll": {
+          "description": "Credit cost per scroll unit.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "same_hand_combo": {
+          "description": "Multiplier applied to same-hand key combinations.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "modifier": {
+          "description": "Credit costs per second of holding modifier keys.",
+          "$ref": "#/$defs/PartialModifierCostConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PartialModifierCostConfig": {
+      "title": "ModifierCosts",
+      "type": "object",
+      "properties": {
+        "shift_per_sec": {
+          "description": "Credit cost per second of holding Shift.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ctrl_per_sec": {
+          "description": "Credit cost per second of holding Control.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "alt_per_sec": {
+          "description": "Credit cost per second of holding Alt.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "meta_per_sec": {
+          "description": "Credit cost per second of holding Meta.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "multi_per_sec": {
+          "description": "Credit cost per second when multiple modifiers are held.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "UnclassifiedCostConfig": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "description": "Credit cost per unclassified key press. Defaults to 1.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "combo": {
+          "description": "Multiplier applied to unclassified key combinations. Defaults to 1.10.",
+          "type": "number",
+          "format": "double",
+          "default": 1.1
+        }
+      },
+      "additionalProperties": false
+    },
+    "CreditRateBoostConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether per-activity rate boosts are enabled. Defaults to `true`.",
+          "type": "boolean",
+          "default": true
+        },
+        "factor": {
+          "description": "Default boost added per multiple of the baseline rate. Defaults to 0.25.",
+          "type": "number",
+          "format": "double",
+          "default": 0.25
+        },
+        "cap": {
+          "description": "Default maximum activity cost multiplier. Defaults to 1.75.",
+          "type": "number",
+          "format": "double",
+          "default": 1.75
+        },
+        "smoothing_secs": {
+          "description": "Default smoothing window in seconds. Defaults to 3.",
+          "type": "number",
+          "format": "double",
+          "default": 3.0
+        },
+        "key": {
+          "description": "Key-press rate boost settings.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PartialRateBoostConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "click": {
+          "description": "Click rate boost settings.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PartialRateBoostConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scroll": {
+          "description": "Scroll rate boost settings.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PartialRateBoostConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "drag": {
+          "description": "Drag rate boost settings.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PartialRateBoostConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "modifier": {
+          "description": "Modifier-hold rate boost settings.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PartialRateBoostConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PartialRateBoostConfig": {
+      "title": "RateBoost",
+      "type": "object",
+      "properties": {
+        "baseline_per_sec": {
+          "description": "Activity rate per second above which boosting begins. Required whenever\nan activity-specific table is present.",
+          "type": "number",
+          "format": "double"
+        },
+        "enabled": {
+          "description": "Whether this activity's boost is enabled. Inherits the parent setting\nwhen omitted.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "factor": {
+          "description": "Boost added per multiple of the baseline. Inherits the parent setting\nwhen omitted.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "cap": {
+          "description": "Maximum activity cost multiplier. Inherits the parent setting when\nomitted.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "smoothing_secs": {
+          "description": "Smoothing window in seconds. Inherits the parent setting when omitted.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "baseline_per_sec"
+      ]
+    },
+    "GlobalCreditBoostConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether the global credit-rate boost is enabled. Defaults to `false`.",
+          "type": "boolean",
+          "default": false
+        },
+        "baseline_credit_per_sec": {
+          "description": "Total credit consumption rate per second above which boosting begins.\nDefaults to 8.",
+          "type": "number",
+          "format": "double",
+          "default": 8.0
+        },
+        "factor": {
+          "description": "Boost added per multiple of the baseline rate. Defaults to 0.20.",
+          "type": "number",
+          "format": "double",
+          "default": 0.2
+        },
+        "cap": {
+          "description": "Maximum global cost multiplier. Defaults to 1.5.",
+          "type": "number",
+          "format": "double",
+          "default": 1.5
+        },
+        "smoothing_secs": {
+          "description": "Smoothing window in seconds. Defaults to 10.",
+          "type": "number",
+          "format": "double",
+          "default": 10.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RestConfig": {
+      "type": "object",
+      "properties": {
+        "require_no_activity": {
+          "description": "Whether rest credit is earned only while there is no user activity.\nDefaults to `false`.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "LearningConfig": {
+      "type": "object",
+      "properties": {
+        "data_recorder": {
+          "description": "Whether to record labeled usage data for future model training. Defaults\nto `false`.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

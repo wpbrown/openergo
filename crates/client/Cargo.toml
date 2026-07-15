@@ -24,6 +24,7 @@ opentelemetry_sdk = { version = "0.32.1", features = ["metrics", "experimental_m
 opentelemetry-otlp = { version = "0.32.0", features = ["metrics", "http-proto", "reqwest-client", "zstd-http"], default-features = false }
 rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
 rootcause = "0.12"
+schemars = { version = "1", features = ["derive", "preserve_order"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

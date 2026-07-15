@@ -2,26 +2,9 @@ use clap::Parser;
 use rootcause::prelude::*;
 use std::path::PathBuf;
 
-mod activity;
-mod app;
-mod assets;
-mod client;
-mod credit;
-mod fdr;
-mod integration;
-mod notifications;
-mod pain;
-mod persistence;
-mod server;
-mod sound;
-mod telemetry;
-mod transports;
-mod usage;
-mod watch_mux;
-
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-pub struct Args {
+struct Args {
     /// Path to the server's Unix domain socket.
     #[arg(long, default_value = shared::socket::DEFAULT_SERVER_SOCKET_PATH)]
     pub server_socket_path: PathBuf,
@@ -47,5 +30,14 @@ fn main() {
 
 fn startup(args: Args) -> Result<(), Report> {
     let rt = tokio::runtime::LocalRuntime::new().context("Failed to create tokio runtime")?;
-    rt.block_on(app::run(args))
+    let Args {
+        server_socket_path,
+        client_socket_path,
+        config,
+    } = args;
+    let config_args = openergo_client::ConfigArgs {
+        server_socket_path,
+        client_socket_path,
+    };
+    rt.block_on(openergo_client::run(config_args, config.as_deref()))
 }

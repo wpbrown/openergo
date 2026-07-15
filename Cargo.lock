@@ -2781,6 +2781,7 @@ dependencies = [
  "opentelemetry_sdk",
  "rodio",
  "rootcause",
+ "schemars 1.2.1",
  "semver",
  "serde",
  "serde_json",
@@ -3624,6 +3625,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap 2.14.0",
  "itoa",
  "memchr",
  "serde",
@@ -5551,13 +5553,17 @@ dependencies = [
 name = "xtask"
 version = "0.3.2"
 dependencies = [
+ "directories",
  "jsonschema-schema",
- "openergo-server",
  "proc-macro2",
  "quote",
+ "rootcause",
  "schemars 1.2.1",
+ "serde",
  "serde_json",
  "syn",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
