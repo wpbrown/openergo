@@ -14,7 +14,7 @@ mod server_config;
 const SERVER_CONFIG_SCHEMA_PATH: &str = "crates/server/config.schema.json";
 const CLIENT_CONFIG_SCHEMA_PATH: &str = "crates/client/config.schema.json";
 const CONFIG_DOCS_PATH: &str = "docs/config-reference.md";
-const CONFIG_DOCS_TEMPLATE: &str = include_str!("reference.template.md");
+const CONFIG_DOCS_TEMPLATE: &str = include_str!("../assets/reference.template.md");
 const SERVER_REFERENCE_PLACEHOLDER: &str = "{{SERVER_CONFIG_REFERENCE}}";
 const CLIENT_REFERENCE_PLACEHOLDER: &str = "{{CLIENT_CONFIG_REFERENCE}}";
 

@@ -56,9 +56,14 @@
           filter = path: type: (craneLib.filterCargoSources path type) || (lib.hasInfix "/assets/" path);
           name = "source";
         };
+        fetchedCargoVendor = pkgs.rustPlatform.fetchCargoVendor {
+          inherit src;
+          hash = "sha256-aJG8qFsNRZfg4cmPLM9zCXXDsT3RkRcdu52hmuVxF0U=";
+        };
+        cargoVendorDir = "${fetchedCargoVendor}/source-registry-0";
 
         commonArgs = {
-          inherit src;
+          inherit src cargoVendorDir;
           strictDeps = true;
 
           nativeBuildInputs = [
