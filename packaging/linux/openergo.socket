@@ -1,0 +1,11 @@
+[Unit]
+Description=Openergo IPC socket
+
+[Socket]
+ListenStream=/run/openergo.sock
+SocketMode=0660
+SocketGroup=openergo
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

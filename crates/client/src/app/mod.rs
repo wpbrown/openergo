@@ -105,8 +105,17 @@ pub async fn run(
         });
 
     // integrations
-    let pain_forwarder_task = (!pain_sources.is_empty())
-        .then(|| modules::pain_integration::start(pain_sources, pain_producer));
+    let (pain_forwarder_task, _pain_producer_keepalive) = if pain_sources.is_empty() {
+        (None, Some(pain_producer))
+    } else {
+        (
+            Some(modules::pain_integration::start(
+                pain_sources,
+                pain_producer,
+            )),
+            None,
+        )
+    };
     let sink_forwarder_task = credit_sinks.any().then(|| {
         modules::utilization_integration::start(
             credit_runtime.utilization_source().subscribe_forward(),

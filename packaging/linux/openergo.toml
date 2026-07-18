@@ -1,0 +1,5 @@
+[dwell_click]
+allow = false
+
+[usage]
+default_pointer_hand = "right"

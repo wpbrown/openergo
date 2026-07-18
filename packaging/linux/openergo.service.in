@@ -1,0 +1,27 @@
+[Unit]
+Description=Openergo input device monitoring service
+Requires=openergo.socket systemd-udevd.service
+After=openergo.socket systemd-udevd.service
+
+[Service]
+Type=simple
+Environment=RUST_LOG=info
+ExecStart=@PREFIX@/bin/openergo-server --config /etc/openergo.toml
+DynamicUser=yes
+User=openergo-server
+SupplementaryGroups=input uinput
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
