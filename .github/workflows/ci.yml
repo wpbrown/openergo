@@ -25,8 +25,9 @@ jobs:
         uses: cachix/cachix-action@v16
         with:
           name: fenix
-      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
         with:
+          use-flakehub: false
           use-gha-cache: enabled
       - name: Check Flake
         run: nix flake check
