@@ -10,19 +10,27 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: "write"
-      contents: "read"
     steps:
       - name: Nothing but Nix
         uses: wimpysworld/nothing-but-nix@v10
-      - uses: actions/checkout@v4
+        with:
+          hatchet-protocol: carve
+      - name: Checkout
+        uses: actions/checkout@v7
       - name: Check Inputs
-        uses: DeterminateSystems/flake-checker-action@main
+        uses: DeterminateSystems/flake-checker-action@v13
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@v3
         with:
           extra-conf: |
             build-dir = /nix/build
+      - name: Use Fenix binary cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: fenix
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-flakehub: false
+          use-gha-cache: enabled
       - name: Check Flake
         run: nix flake check
