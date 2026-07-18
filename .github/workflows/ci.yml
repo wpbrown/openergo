@@ -13,7 +13,10 @@ jobs:
     steps:
       - name: Nothing but Nix
         uses: wimpysworld/nothing-but-nix@v10
-      - uses: actions/checkout@v4
+        with:
+          hatchet-protocol: carve
+      - name: Checkout
+        uses: actions/checkout@v7
       - name: Check Inputs
         uses: DeterminateSystems/flake-checker-action@v13
       - name: Install Nix
@@ -22,7 +25,7 @@ jobs:
           extra-conf: |
             build-dir = /nix/build
       - name: Use Fenix binary cache
-        uses: cachix/cachix-action@v16
+        uses: cachix/cachix-action@v17
         with:
           name: fenix
       - uses: DeterminateSystems/magic-nix-cache-action@v14
