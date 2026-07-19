@@ -60,8 +60,9 @@ make
 sudo make install PREFIX=/usr
 ```
 
-Do not choose an arbitrary prefix unless both its `lib/systemd/system` and
-`lib/systemd/user` directories are configured in systemd's unit load path.  
+Do not choose an arbitrary prefix unless its `lib/systemd/system` and
+`lib/systemd/user` directories are configured in systemd's unit load path and
+its `lib/udev/rules.d` directory is configured as a udev rules directory.
 
 On systems with SELinux enabled, installation restores the distribution-defined
 contexts on the installed files.
@@ -75,10 +76,10 @@ The default installation layout is:
 /usr/local/lib/systemd/system/openergo.service
 /usr/local/lib/systemd/system/openergo.socket
 /usr/local/lib/systemd/user/openergo-client.service
+/usr/local/lib/udev/rules.d/70-openergo-uinput.rules
 /usr/local/share/doc/openergo/
 /etc/openergo.toml
 /etc/modules-load.d/openergo.conf
-/etc/udev/rules.d/70-openergo-uinput.rules
 ```
 
 ### Reinstall

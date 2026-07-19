@@ -1,0 +1,50 @@
+#!/bin/sh
+
+set -e
+
+die() {
+	printf 'openergo post-installation error: %s\n' "$*" >&2
+	exit 1
+}
+
+ensure_group() {
+	group_name="$1"
+
+	if ! getent group "${group_name}" >/dev/null; then
+		groupadd --system "${group_name}"
+	fi
+}
+
+configure_uinput() {
+	getent group input >/dev/null ||
+		die "required distro-managed group 'input' does not exist"
+
+	ensure_group openergo
+	ensure_group uinput
+
+	udevadm control --reload-rules ||
+		die "failed to reload udev rules"
+	modprobe uinput ||
+		die "failed to load the uinput kernel module"
+	udevadm trigger --action=add --subsystem-match=misc --sysname-match=uinput ||
+		die "failed to trigger the uinput udev rule"
+
+	if [ ! -e /dev/uinput ]; then
+		printf '%s\n' 'warning: /dev/uinput is not present; physical dwell-click behavior cannot be tested on this system' >&2
+	fi
+}
+
+case "${1:-}" in
+configure)
+	configure_uinput
+	;;
+abort-upgrade | abort-remove | abort-deconfigure)
+	;;
+*)
+	die "unsupported maintainer-script action '${1:-}'"
+	;;
+esac
+
+#DEBHELPER#
+
+exit 0

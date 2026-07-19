@@ -186,7 +186,7 @@ restore_selinux_contexts() {
 		"${prefix}/lib/systemd/system/openergo.service" \
 		"${prefix}/lib/systemd/user/openergo-client.service" \
 		/etc/openergo.toml \
-		/etc/udev/rules.d/70-openergo-uinput.rules \
+		"${prefix}/lib/udev/rules.d/70-openergo-uinput.rules" \
 		/etc/modules-load.d/openergo.conf ||
 		die "failed to restore SELinux contexts on installed Openergo files"
 }
@@ -252,6 +252,7 @@ install_openergo() {
 		"${prefix}/bin" \
 		"${prefix}/lib/systemd/system" \
 		"${prefix}/lib/systemd/user" \
+		"${prefix}/lib/udev/rules.d" \
 		"${prefix}/share/doc/openergo"
 
 	install -m 0755 \
@@ -273,7 +274,7 @@ install_openergo() {
 		"${prefix}/share/doc/openergo/"
 
 	install -m 0644 "${ASSET_DIR}/70-openergo-uinput.rules" \
-		/etc/udev/rules.d/70-openergo-uinput.rules
+		"${prefix}/lib/udev/rules.d/70-openergo-uinput.rules"
 	install -m 0644 "${ASSET_DIR}/openergo.conf" \
 		/etc/modules-load.d/openergo.conf
 	if [[ -e /etc/openergo.toml || -L /etc/openergo.toml ]]; then

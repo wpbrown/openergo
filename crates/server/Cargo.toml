@@ -3,6 +3,7 @@ name = "openergo-server"
 version.workspace = true
 edition = "2024"
 license.workspace = true
+description = "Openergo server"
 
 [lints]
 workspace = true
@@ -34,3 +35,30 @@ tokio = { version = "1.52.3", features = ["macros", "rt", "test-util", "time"] }
 
 [features]
 tokio-console = ["shared/tokio-console"]
+
+[package.metadata.deb]
+name = "openergo"
+maintainer = "Will <opensource@rebeagle.com>"
+copyright = "2026, Will <opensource@rebeagle.com>"
+license-file = ["../../packaging/debian/license", "0"]
+extended-description = "Openergo tracks keyboard and mouse usage to help prevent RSI."
+depends = "$auto, init-system-helpers (>= 1.18~), systemd, udev, kmod, passwd"
+section = "utils"
+priority = "optional"
+maintainer-scripts = "../../packaging/debian"
+changelog = "../../target/package/openergo-debian-changelog"
+assets = [
+	["target/release/openergo-server", "usr/bin/openergo-server", "755"],
+	["target/release/openergo-client", "usr/bin/openergo-client", "755"],
+	["target/release/openergo", "usr/bin/openergo", "755"],
+	["../../packaging/linux/openergo.socket", "usr/lib/systemd/system/openergo.socket", "644"],
+	["../../packaging/debian/openergo-client.service", "usr/lib/systemd/user/openergo-client.service", "644"],
+	["../../packaging/linux/openergo.toml", "etc/openergo.toml", "644"],
+	["../../packaging/linux/openergo.conf", "etc/modules-load.d/openergo.conf", "644"],
+	["../../packaging/linux/70-openergo-uinput.rules", "usr/lib/udev/rules.d/70-openergo-uinput.rules", "644"],
+	["../../LICENSE", "usr/share/doc/openergo/LICENSE", "644"],
+	["../../docs/config-reference.md", "usr/share/doc/openergo/config-reference.md", "644"],
+	["../../docs/debian-install.md", "usr/share/doc/openergo/debian-install.md", "644"],
+	["../../docs/manual-install.md", "usr/share/doc/openergo/manual-install.md", "644"],
+]
+systemd-units = [{ unit-name = "openergo", enable = true, start = true }]
