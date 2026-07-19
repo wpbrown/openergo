@@ -19,6 +19,7 @@ use std::path::PathBuf;
 /// drivers exit cleanly.
 pub fn start(
     socket_path: PathBuf,
+    dwell_click_sound: bool,
     usage_raw_producer: UsageRawProducer,
     activity_producer: ActivityProducer,
     mut calculator: CreditCalculator,
@@ -30,6 +31,12 @@ pub fn start(
     });
     oe_spawn!(
         "server-reconnect",
-        client::reconnect_loop(socket_path, producer, activity_producer, shutdown)
+        client::reconnect_loop(
+            socket_path,
+            dwell_click_sound,
+            producer,
+            activity_producer,
+            shutdown
+        )
     )
 }

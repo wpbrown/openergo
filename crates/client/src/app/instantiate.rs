@@ -12,6 +12,7 @@ pub struct RuntimeConfig {
     pub server_socket_path: PathBuf,
     pub client_socket_path: PathBuf,
     pub telemetry_report_usage: Option<bool>,
+    pub dwell_click_sound: bool,
     pub devices: HashMap<String, modules::endpoints::DeviceConfig>,
     pub pain: Option<modules::pain::Config>,
     pub pain_check: Option<modules::pain_check::Config>,
@@ -29,6 +30,7 @@ pub fn instantiate(
 
     let config::ConfigFile {
         telemetry,
+        dwell_click,
         devices,
         pain,
         credit,
@@ -54,6 +56,7 @@ pub fn instantiate(
         telemetry_report_usage: telemetry
             .and_then(|cfg| cfg.report_usage)
             .filter(|enabled| *enabled),
+        dwell_click_sound: dwell_click.sound,
         devices: devices
             .into_iter()
             .map(|(key, device)| (key, convert_device(device)))

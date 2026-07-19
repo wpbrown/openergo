@@ -25,6 +25,7 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 pub async fn reconnect_loop<S>(
     socket_path: PathBuf,
+    dwell_click_sound: bool,
     mut usage_producer: S,
     activity_producer: ActivityProducer,
     mut shutdown: ShutdownSignal,
@@ -32,7 +33,7 @@ pub async fn reconnect_loop<S>(
 where
     S: Sink<UsageIncrement> + Unpin,
 {
-    let sound_player = SoundPlayer::new()?;
+    let mut sound_player = dwell_click_sound.then(SoundPlayer::new).transpose()?;
     info!("using server socket path: {}", socket_path.display());
 
     loop {
@@ -74,7 +75,7 @@ where
                 &mut framed,
                 &mut usage_producer,
                 &activity_producer,
-                &sound_player,
+                sound_player.as_mut(),
                 &mut shutdown,
             )
             .await;
@@ -100,7 +101,7 @@ async fn handle_connection<S>(
     framed: &mut FramedStream,
     usage_producer: &mut S,
     activity_producer: &ActivityProducer,
-    sound_player: &SoundPlayer,
+    mut sound_player: Option<&mut SoundPlayer>,
     shutdown: &mut ShutdownSignal,
 ) -> bool
 where
@@ -120,7 +121,9 @@ where
         match msg {
             Ok(ServerMessage::Click) => {
                 info!("Click");
-                sound_player.play(assets::CLICK);
+                if let Some(sound_player) = sound_player.as_deref_mut() {
+                    sound_player.play(assets::CLICK);
+                }
             }
             Ok(ServerMessage::NewUsage(increment)) => {
                 trace!(increment = %increment, "new usage");

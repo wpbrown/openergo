@@ -18,6 +18,9 @@ pub struct ConfigArgs {
 pub struct ConfigFile {
     /// OpenTelemetry usage reporting settings.
     pub telemetry: Option<TelemetryConfig>,
+    /// Dwell click settings.
+    #[serde(default)]
+    pub dwell_click: DwellClickConfig,
     /// External input and output devices, keyed by a unique device name.
     #[serde(default)]
     pub devices: HashMap<String, DeviceConfig>,
@@ -29,6 +32,14 @@ pub struct ConfigFile {
     pub rest: Option<RestConfig>,
     /// Data collection settings for future learning features.
     pub learning: Option<LearningConfig>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DwellClickConfig {
+    /// Whether to play a sound when a dwell click occurs. Defaults to `false`.
+    #[serde(default)]
+    pub sound: bool,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -597,5 +608,15 @@ mod tests {
         assert_eq!(check.indicator.as_deref(), Some("led"));
         assert!(check.notifications.notifications);
         assert!(check.notifications.sounds);
+    }
+
+    #[test]
+    fn dwell_click_sound_defaults_to_disabled() {
+        let config: ConfigFile = toml::from_str("").expect("config should parse");
+        assert!(!config.dwell_click.sound);
+
+        let config: ConfigFile =
+            toml::from_str("[dwell_click]\nsound = true").expect("config should parse");
+        assert!(config.dwell_click.sound);
     }
 }

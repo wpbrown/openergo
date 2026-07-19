@@ -33,7 +33,7 @@ pub fn create(
 }
 
 async fn run(config: NotificationSettings, mut events: CreditEventConsumer) {
-    let player = if config.sounds {
+    let mut player = if config.sounds {
         match QueuedSoundPlayer::new() {
             Ok(p) => Some(p),
             Err(e) => {
@@ -55,7 +55,7 @@ async fn run(config: NotificationSettings, mut events: CreditEventConsumer) {
             Ok(ev) => ev,
         };
 
-        handle_event(ev, &config, &mut hits, player.as_ref());
+        handle_event(ev, &config, &mut hits, player.as_mut());
     }
 }
 
@@ -63,15 +63,16 @@ fn handle_event(
     ev: CreditEvent,
     config: &NotificationSettings,
     hits: &mut LimitHits,
-    player: Option<&QueuedSoundPlayer>,
+    player: Option<&mut QueuedSoundPlayer>,
 ) {
+    let mut player = player;
     match ev {
         CreditEvent::Reached { kind } => {
             hits.set(kind, true);
             if config.notifications {
                 notify::show(format!("{} credit limit reached", kind_label(kind)));
             }
-            if let Some(p) = player {
+            if let Some(p) = player.as_deref_mut() {
                 p.play(limit_sound(kind));
             }
         }
@@ -83,7 +84,7 @@ fn handle_event(
                     u16::from(level) * 10 + 100
                 ));
             }
-            if let Some(p) = player {
+            if let Some(p) = player.as_deref_mut() {
                 p.play_repeat(assets::ESCALATION, u32::from(level) * 3);
             }
         }

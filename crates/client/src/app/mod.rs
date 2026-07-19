@@ -17,6 +17,7 @@ pub async fn run(
         server_socket_path,
         client_socket_path,
         telemetry_report_usage,
+        dwell_click_sound,
         devices,
         pain,
         pain_check,
@@ -181,6 +182,7 @@ pub async fn run(
     let (usage_raw_producer, usage_tasks) = usage_runtime.detach();
     let server_link_task = modules::server_link::start(
         server_socket_path,
+        dwell_click_sound,
         usage_raw_producer,
         activity_producer,
         credit_calculator,

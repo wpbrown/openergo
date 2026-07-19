@@ -83,8 +83,7 @@ These types are referenced from more than one setting or used as map values.
 <a id="type-devicematcher"></a>
 #### `DeviceFilter`
 
-Matches a device by path and/or udev properties. All specified fields must match
-(AND logic). At least one field must be set.
+Matches a device by path and/or udev properties. All specified fields must match (AND logic). At least one field must be set.
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -149,6 +148,14 @@ OpenTelemetry usage reporting settings.
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
 | `report_usage` | `boolean` | no | Whether to report usage as OpenTelemetry metrics. Defaults to `false`. |
+
+### `[dwell_click]`
+
+Dwell click settings.
+
+| Key | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sound` | `boolean` | no | Whether to play a sound when a dwell click occurs. Defaults to `false`. |
 
 ### `[devices]`
 

@@ -15,6 +15,10 @@
         }
       ]
     },
+    "dwell_click": {
+      "description": "Dwell click settings.",
+      "$ref": "#/$defs/DwellClickConfig"
+    },
     "devices": {
       "description": "External input and output devices, keyed by a unique device name.",
       "type": "object",
@@ -78,6 +82,17 @@
             "boolean",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DwellClickConfig": {
+      "type": "object",
+      "properties": {
+        "sound": {
+          "description": "Whether to play a sound when a dwell click occurs. Defaults to `false`.",
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false
