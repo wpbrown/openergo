@@ -26,6 +26,17 @@ pub struct PainModule {
     sources: Vec<(PainLabel, EndpointLabel)>,
 }
 
+pub struct PainRuntime {
+    pub source: PainSource,
+    pub active: Option<ActivePainRuntime>,
+}
+
+pub struct ActivePainRuntime {
+    pub live_source: PainLiveSource,
+    pub producer: PainProducer,
+    pub driver_task: JoinHandle<Result<(), Report>>,
+}
+
 impl PainModule {
     /// Catalog reference for callers that need to resolve labels
     /// before the pain driver has started (e.g. `persistence::load`).
@@ -51,23 +62,25 @@ impl PainModule {
         Ok(out)
     }
 
-    /// Spawn the pain debounce driver. Consumes the module: after
-    /// `start` the catalog lives inside the returned [`PainSource`]
-    /// / [`PainLiveSource`] / [`PainProducer`] handles (shared via `Rc`). Returns the
-    /// spawned driver's join handle alongside the source/producer
-    /// pair.
-    pub fn start(
-        self,
-        initial: PainState,
-    ) -> (
-        PainSource,
-        PainLiveSource,
-        PainProducer,
-        JoinHandle<Result<(), Report>>,
-    ) {
+    /// Start active pain tracking when sources are configured, otherwise
+    /// retain only a closed, readable committed snapshot.
+    pub fn start(self, initial: PainState) -> PainRuntime {
+        if self.sources.is_empty() {
+            return PainRuntime {
+                source: pain::create_inactive(self.catalog, initial),
+                active: None,
+            };
+        }
+
         let (source, live_source, producer, driver) = pain::create(self.catalog, initial);
-        let task = oe_spawn!("pain-driver", driver);
-        (source, live_source, producer, task)
+        PainRuntime {
+            source,
+            active: Some(ActivePainRuntime {
+                live_source,
+                producer,
+                driver_task: oe_spawn!("pain-driver", driver),
+            }),
+        }
     }
 }
 
@@ -102,4 +115,50 @@ pub fn init(
     let pain_label_store: &'static PainLabelStore = pain_label_store.finalize();
     let catalog = pain::build_catalog(pain_label_store, &specs);
     Ok(PainModule { catalog, sources })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::task::LocalSet;
+
+    fn pain_module(active: bool) -> PainModule {
+        let mut pain_labels = PainLabelStore::new();
+        let pain_label = pain_labels.get_or_intern("left-hand");
+        let catalog = pain::build_catalog(pain_labels.finalize(), &[]);
+        let sources = if active {
+            let mut endpoint_labels = EndpointLabelStore::new();
+            vec![(pain_label, endpoint_labels.get_or_intern("pain-control"))]
+        } else {
+            Vec::new()
+        };
+        PainModule { catalog, sources }
+    }
+
+    #[tokio::test]
+    async fn inactive_start_has_only_a_closed_readable_source() {
+        let runtime = pain_module(false).start(PainState::default());
+        assert!(runtime.active.is_none());
+
+        let mut consumer = runtime.source.subscribe_forward();
+        consumer.view(|state, _catalog| assert!(state.entries.is_empty()));
+        assert_eq!(consumer.changed().await, Err(bachelor::error::Closed));
+    }
+
+    #[tokio::test]
+    async fn active_start_returns_live_handles_and_joinable_driver() {
+        LocalSet::new()
+            .run_until(async {
+                let runtime = pain_module(true).start(PainState::default());
+                let active = runtime.active.expect("configured pain should be active");
+                let _live_consumer = active.live_source.subscribe_forward();
+
+                drop(active.producer);
+                active.driver_task.await.unwrap();
+
+                let mut consumer = runtime.source.subscribe_forward();
+                assert_eq!(consumer.changed().await, Err(bachelor::error::Closed));
+            })
+            .await;
+    }
 }

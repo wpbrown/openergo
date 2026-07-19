@@ -34,7 +34,7 @@ pub struct CreditLimitProducer {
     inner: MpmcWatchRefProducer<CreditLimitState>,
 }
 
-#[expect(unused)] // pending the future tuner
+#[cfg_attr(not(test), expect(unused, reason = "pending the future tuner"))]
 impl CreditLimitProducer {
     /// Replace the current limit state. Errors from a closed watch are
     /// silently dropped, mirroring the convention used by other producers

@@ -96,6 +96,12 @@ impl PainLiveConsumer {
     }
 }
 
+impl crate::watch_mux::FiniteChanges for PainLiveConsumer {
+    fn changed(&mut self) -> impl Future<Output = Result<(), Closed>> + Unpin + '_ {
+        PainLiveConsumer::changed(self)
+    }
+}
+
 /// The source side of the pain watch. Hands out [`PainConsumer`] subscribers.
 #[derive(Clone)]
 pub struct PainSource {
@@ -175,6 +181,18 @@ pub fn create(
 
     let driver = debounce_loop(live_source.subscribe_forward(), state_producer, catalog);
     (source, live_source, producer, driver)
+}
+
+/// Construct a closed, readable committed pain source without a live watch or
+/// debounce driver.
+pub fn create_inactive(catalog: PainCatalog, initial: PainState) -> PainSource {
+    let catalog = Rc::new(catalog);
+    let (state_producer, source) = mpmc_watch(initial);
+    drop(state_producer);
+    PainSource {
+        inner: source,
+        catalog,
+    }
 }
 
 /// Background task that copies live values into committed ratios after a quiet
@@ -272,4 +290,48 @@ fn commit_pending(
             state.commit(label, ratio);
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn catalog_with_label() -> (PainCatalog, PainLabel) {
+        let mut labels = PainLabelStore::new();
+        let label = labels.get_or_intern("left-hand");
+        let labels = labels.finalize();
+        (build_catalog(labels, &[]), label)
+    }
+
+    #[tokio::test]
+    async fn inactive_source_is_closed_but_readable() {
+        let (catalog, label) = catalog_with_label();
+        let mut initial = PainState::default();
+        initial.commit(label, 0.75);
+
+        let source = create_inactive(catalog, initial);
+        let mut consumer = source.subscribe_forward();
+
+        consumer.view(|state, catalog| {
+            assert_eq!(catalog.resolve(label), "left-hand");
+            assert_eq!(state.entries.get(&label).unwrap().ratio(), 0.75);
+        });
+        assert_eq!(consumer.changed().await, Err(Closed));
+    }
+
+    #[tokio::test]
+    async fn active_driver_commits_final_state_and_closes() {
+        let (catalog, label) = catalog_with_label();
+        let (source, _live_source, producer, driver) = create(catalog, PainState::default());
+        producer.set(label, 0.5).unwrap();
+
+        drop(producer);
+        driver.await.unwrap();
+
+        let mut consumer = source.subscribe_forward();
+        consumer.view(|state, _catalog| {
+            assert_eq!(state.entries.get(&label).unwrap().ratio(), 0.5);
+        });
+        assert_eq!(consumer.changed().await, Err(Closed));
+    }
 }

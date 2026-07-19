@@ -7,7 +7,7 @@ pub mod daily;
 pub mod rest;
 
 use crate::credit::CreditIncrement;
-pub use all_sources::{AllUsageConsumer, AllUsageSources, UsageSource};
+pub use all_sources::{AllUsageConsumer, AllUsageSources};
 use bachelor::broadcast::spmc::{
     SpmcBroadcastConsumer, SpmcBroadcastProducer, SpmcBroadcastSource,
 };

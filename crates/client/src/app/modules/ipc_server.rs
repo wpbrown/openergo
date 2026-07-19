@@ -17,7 +17,7 @@ use tracing::info;
 pub fn start(
     path: PathBuf,
     sources: AllUsageSources,
-    pain: PainLiveSource,
+    pain: Option<PainLiveSource>,
     credit_limits: CreditLimitSource,
     shutdown: ShutdownSignal,
 ) -> Result<JoinHandle<Result<(), Report>>, Report> {

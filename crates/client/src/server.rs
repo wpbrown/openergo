@@ -1,10 +1,14 @@
+use std::pin::pin;
+
 use crate::credit::limit::{CreditLimitConsumer, CreditLimitSource};
 use crate::pain::{PainLiveConsumer, PainLiveSource};
-use crate::usage::{AllUsageConsumer, AllUsageSources, UsageSource};
+use crate::usage::{AllUsageConsumer, AllUsageSources};
+use crate::watch_mux::{WatchMux, define_watch_mux};
 use bachelor::error::Closed;
 use futures::future::{Either, select};
 use futures::{SinkExt, StreamExt, pin_mut};
 use rootcause::prelude::*;
+use shared::model::{Credit, CreditLimit};
 use shared::oe_spawn;
 use shared::protocol::client::{ClientMessage, ClientServerCodec, CowStr, PROTOCOL_VERSION};
 use shared::protocol::write_protocol_version;
@@ -17,7 +21,7 @@ use tracing::{debug, error, info};
 pub fn create(
     listener: UnixListener,
     sources: AllUsageSources,
-    pain_source: PainLiveSource,
+    pain_source: Option<PainLiveSource>,
     credit_limits: CreditLimitSource,
 ) -> ClientServer {
     ClientServer {
@@ -31,7 +35,7 @@ pub fn create(
 pub struct ClientServer {
     listener: UnixListener,
     sources: AllUsageSources,
-    pain_source: PainLiveSource,
+    pain_source: Option<PainLiveSource>,
     credit_limits: CreditLimitSource,
 }
 
@@ -46,7 +50,10 @@ impl ClientServer {
             match event {
                 Either::Left((Ok((stream, _)), _)) => {
                     let listener_sources = self.sources.subscribe_forward();
-                    let listener_pain = self.pain_source.subscribe_forward();
+                    let listener_pain = self
+                        .pain_source
+                        .as_ref()
+                        .map(PainLiveSource::subscribe_forward);
                     let listener_limits = self.credit_limits.subscribe_forward();
                     // Intentionally detached: each listener is bounded by
                     // client disconnect or by closure of the watched sources
@@ -70,11 +77,51 @@ impl ClientServer {
     }
 }
 
+define_watch_mux! {
+    struct ListenerInputs;
+    flags ListenerInput;
+    usage: AllUsageConsumer => USAGE,
+    pain: Option<PainLiveConsumer> => PAIN,
+    limits: CreditLimitConsumer => LIMITS,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct OutboundSnapshot {
+    rest: (Credit, CreditLimit),
+    breaks: (Credit, CreditLimit),
+    day: (Credit, CreditLimit),
+}
+
+impl OutboundSnapshot {
+    fn read(inputs: &ListenerInputs) -> Self {
+        let limits = inputs.limits.view(|state| *state);
+        inputs.usage.view(|_all, rest, breaks, day| Self {
+            rest: (rest.credit().total(), limits.rest),
+            breaks: (breaks.credit().total(), limits.breaks),
+            day: (day.credit().total(), limits.day),
+        })
+    }
+
+    fn messages_since(self, previous: Option<Self>) -> Vec<ClientMessage> {
+        let mut messages = Vec::with_capacity(3);
+        if previous.is_none_or(|previous| previous.rest != self.rest) {
+            messages.push(ClientMessage::Rest(self.rest.0, self.rest.1));
+        }
+        if previous.is_none_or(|previous| previous.breaks != self.breaks) {
+            messages.push(ClientMessage::Break(self.breaks.0, self.breaks.1));
+        }
+        if previous.is_none_or(|previous| previous.day != self.day) {
+            messages.push(ClientMessage::Day(self.day.0, self.day.1));
+        }
+        messages
+    }
+}
+
 async fn handle_listener(
     mut stream: UnixStream,
-    mut sources: AllUsageConsumer,
-    mut pain: PainLiveConsumer,
-    mut limits: CreditLimitConsumer,
+    usage: AllUsageConsumer,
+    pain: Option<PainLiveConsumer>,
+    limits: CreditLimitConsumer,
 ) {
     if let Err(e) = write_protocol_version(&mut stream, PROTOCOL_VERSION).await {
         debug!("Failed to send protocol version to CLI listener: {e}");
@@ -83,41 +130,39 @@ async fn handle_listener(
 
     let codec = ClientServerCodec::default();
     let mut framed = Framed::new(stream, codec);
-
-    // Snapshot limits up front. We keep a local cache so a single limit
-    // change only re-sends the messages whose limit actually moved.
-    let mut last_limits = limits.view(|state| *state);
-
-    // Send initial totals so the listener has a snapshot before waiting for
-    // the next change.
-    let (rest, brk, day) = sources.view(|_all, rest, breaks, day| {
-        (
-            rest.credit().total(),
-            breaks.credit().total(),
-            day.credit().total(),
-        )
+    let mut inputs = WatchMux::new(ListenerInputs {
+        usage,
+        pain,
+        limits,
     });
-    let initial_pain = pain.view(|state, catalog| {
-        state
-            .entries
-            .iter()
-            .map(|(label, ratio)| (catalog.resolve(*label), *ratio))
-            .collect::<Vec<(&'static str, f64)>>()
-    });
-    let initial = [
-        ClientMessage::Rest(rest, last_limits.rest),
-        ClientMessage::Break(brk, last_limits.breaks),
-        ClientMessage::Day(day, last_limits.day),
-    ]
-    .into_iter()
-    .chain(
-        initial_pain
+
+    let mut last_snapshot = OutboundSnapshot::read(inputs.get());
+    let initial_pain = inputs
+        .get()
+        .pain
+        .as_ref()
+        .map(|pain| {
+            pain.view(|state, catalog| {
+                state
+                    .entries
+                    .iter()
+                    .map(|(label, ratio)| (catalog.resolve(*label), *ratio))
+                    .collect::<Vec<(&'static str, f64)>>()
+            })
+        })
+        .unwrap_or_default();
+    let initial =
+        last_snapshot
+            .messages_since(None)
             .into_iter()
-            .map(|(label, ratio)| ClientMessage::Pain {
-                label: CowStr::borrowed(label),
-                ratio,
-            }),
-    );
+            .chain(
+                initial_pain
+                    .into_iter()
+                    .map(|(label, ratio)| ClientMessage::Pain {
+                        label: CowStr::borrowed(label),
+                        ratio,
+                    }),
+            );
     for msg in initial {
         if let Err(e) = framed.send(msg).await {
             error!("failed to send initial state to client: {e}");
@@ -126,67 +171,47 @@ async fn handle_listener(
     }
 
     loop {
-        let outcome = match next_outcome(&mut sources, &mut pain, &mut limits, &mut framed).await {
-            Ok(o) => o,
+        let event = match next_event(&mut inputs, &mut framed).await {
+            Ok(event) => event,
             Err(report) => {
                 error!("client handler failed: {report}");
                 return;
             }
         };
 
-        let msgs_to_send: Vec<ClientMessage> = match outcome {
-            Outcome::SourceGone(name) => {
-                debug!("{name} source closed, disconnecting client");
+        let msgs_to_send = match event {
+            ListenerEvent::InputsClosed => {
+                debug!("all application sources closed, disconnecting client");
                 return;
             }
-            Outcome::ClientGone => {
+            ListenerEvent::ClientGone => {
                 info!("client disconnected");
                 return;
             }
-            Outcome::State(UsageSource::All) => continue, // intentionally not forwarded
-            Outcome::State(UsageSource::Rest) => {
-                let total = sources.view(|_, rest, _, _| rest.credit().total());
-                vec![ClientMessage::Rest(total, last_limits.rest)]
+            ListenerEvent::Input(ListenerInput::USAGE | ListenerInput::LIMITS) => {
+                let snapshot = OutboundSnapshot::read(inputs.get());
+                let messages = snapshot.messages_since(Some(last_snapshot));
+                last_snapshot = snapshot;
+                messages
             }
-            Outcome::State(UsageSource::Break) => {
-                let total = sources.view(|_, _, breaks, _| breaks.credit().total());
-                vec![ClientMessage::Break(total, last_limits.breaks)]
-            }
-            Outcome::State(UsageSource::Day) => {
-                let total = sources.view(|_, _, _, day| day.credit().total());
-                vec![ClientMessage::Day(total, last_limits.day)]
-            }
-            Outcome::Pain => pain.view(|state, catalog| {
-                state
-                    .entries
-                    .iter()
-                    .map(|(label, ratio)| ClientMessage::Pain {
-                        label: CowStr::borrowed(catalog.resolve(*label)),
-                        ratio: *ratio,
+            ListenerEvent::Input(ListenerInput::PAIN) => inputs
+                .get()
+                .pain
+                .as_ref()
+                .map(|pain| {
+                    pain.view(|state, catalog| {
+                        state
+                            .entries
+                            .iter()
+                            .map(|(label, ratio)| ClientMessage::Pain {
+                                label: CowStr::borrowed(catalog.resolve(*label)),
+                                ratio: *ratio,
+                            })
+                            .collect()
                     })
-                    .collect()
-            }),
-            Outcome::Limits => {
-                let new_limits = limits.view(|state| *state);
-                let mut msgs = Vec::with_capacity(3);
-                if new_limits.rest != last_limits.rest {
-                    let total = sources.view(|_, rest, _, _| rest.credit().total());
-                    msgs.push(ClientMessage::Rest(total, new_limits.rest));
-                }
-                if new_limits.breaks != last_limits.breaks {
-                    let total = sources.view(|_, _, breaks, _| breaks.credit().total());
-                    msgs.push(ClientMessage::Break(total, new_limits.breaks));
-                }
-                if new_limits.day != last_limits.day {
-                    let total = sources.view(|_, _, _, day| day.credit().total());
-                    msgs.push(ClientMessage::Day(total, new_limits.day));
-                }
-                last_limits = new_limits;
-                if msgs.is_empty() {
-                    continue;
-                }
-                msgs
-            }
+                })
+                .unwrap_or_default(),
+            ListenerEvent::Input(_) => continue,
         };
 
         for msg in msgs_to_send {
@@ -198,54 +223,256 @@ async fn handle_listener(
     }
 }
 
-/// Inputs that can drive the listener loop.
-enum Outcome {
-    /// One of the four usage state sources reported a change.
-    State(UsageSource),
-    /// The pain state changed.
-    Pain,
-    /// The credit-limit state changed.
-    Limits,
-    /// One of the upstream watch sources closed. Named so the log line can
-    /// identify which one. Generally happens during client shutdown.
-    SourceGone(&'static str),
-    /// The downstream CLI disconnected its socket.
+enum ListenerEvent {
+    Input(ListenerInput),
+    InputsClosed,
     ClientGone,
 }
 
-/// Race the listener's input streams. Decoding errors from the CLI socket
-/// surface as `Err`; everything else (including upstream/downstream
-/// disconnects) is reported via [`Outcome`] so the caller can decide how
-/// loudly to log it.
-async fn next_outcome(
-    sources: &mut AllUsageConsumer,
-    pain: &mut PainLiveConsumer,
-    limits: &mut CreditLimitConsumer,
+async fn next_event(
+    inputs: &mut WatchMux<ListenerInputs>,
     framed: &mut Framed<UnixStream, ClientServerCodec>,
-) -> Result<Outcome, Report> {
-    let next_state = sources.changed();
-    let next_pain = pain.changed();
-    let next_limits = limits.changed();
-    let next_command = framed.next();
-    let state_or_pain = select(next_state, next_pain);
-    let state_pain_or_limits = select(state_or_pain, next_limits);
-    Ok(match select(state_pain_or_limits, next_command).await {
-        Either::Left((Either::Left((Either::Left((Ok(source), _)), _)), _)) => {
-            Outcome::State(source)
-        }
-        Either::Left((Either::Left((Either::Left((Err(Closed), _)), _)), _)) => {
-            Outcome::SourceGone("usage")
-        }
-        Either::Left((Either::Left((Either::Right((Ok(()), _)), _)), _)) => Outcome::Pain,
-        Either::Left((Either::Left((Either::Right((Err(Closed), _)), _)), _)) => {
-            Outcome::SourceGone("pain")
-        }
-        Either::Left((Either::Right((Ok(()), _)), _)) => Outcome::Limits,
-        Either::Left((Either::Right((Err(Closed), _)), _)) => Outcome::SourceGone("credit-limit"),
+) -> Result<ListenerEvent, Report> {
+    let input = pin!(inputs.changed());
+    let command = framed.next();
+    Ok(match select(input, command).await {
+        Either::Left((Ok(input), _)) => ListenerEvent::Input(input),
+        Either::Left((Err(Closed), _)) => ListenerEvent::InputsClosed,
         Either::Right((Some(Ok(cmd)), _)) => match cmd {},
         Either::Right((Some(Err(e)), _)) => {
             return Err(e).context("Failed to decode CLI command")?;
         }
-        Either::Right((None, _)) => Outcome::ClientGone,
+        Either::Right((None, _)) => ListenerEvent::ClientGone,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credit::limit::{self, CreditLimitProducer, CreditLimitState};
+    use crate::pain::{self, PainLabelStore, PainState};
+    use crate::usage::all::AllState;
+    use crate::usage::breaks::BreakState;
+    use crate::usage::daily::DayState;
+    use crate::usage::rest::RestState;
+    use bachelor::watch::{MpmcWatchRefProducer, mpmc_watch};
+    use futures::future::{join, join3};
+    use shared::protocol::client::CliCodec;
+    use shared::protocol::read_protocol_version;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+    const NO_MESSAGE_TIMEOUT: Duration = Duration::from_millis(20);
+
+    struct UsageProducers {
+        _all: MpmcWatchRefProducer<AllState>,
+        rest: MpmcWatchRefProducer<RestState>,
+        _breaks: MpmcWatchRefProducer<BreakState>,
+        _day: MpmcWatchRefProducer<DayState>,
+    }
+
+    fn usage_fixture() -> (AllUsageConsumer, UsageProducers) {
+        let (all, all_source) = mpmc_watch(AllState::default());
+        let (rest, rest_source) = mpmc_watch(RestState::default());
+        let (breaks, break_source) = mpmc_watch(BreakState::default());
+        let (day, day_source) = mpmc_watch(DayState::default());
+        let sources = AllUsageSources::new(all_source, rest_source, break_source, day_source);
+        (
+            sources.subscribe_forward(),
+            UsageProducers {
+                _all: all,
+                rest,
+                _breaks: breaks,
+                _day: day,
+            },
+        )
+    }
+
+    async fn connect_cli(stream: &mut UnixStream) -> Framed<&mut UnixStream, CliCodec> {
+        assert_eq!(
+            read_protocol_version(stream, PROTOCOL_VERSION)
+                .await
+                .unwrap(),
+            None
+        );
+        Framed::new(stream, CliCodec::default())
+    }
+
+    async fn next_message(framed: &mut Framed<&mut UnixStream, CliCodec>) -> ClientMessage {
+        framed.next().await.unwrap().unwrap()
+    }
+
+    fn assert_initial_usage(messages: [ClientMessage; 3]) {
+        assert!(matches!(
+            messages[0],
+            ClientMessage::Rest(Credit::ZERO, CreditLimit::ZERO)
+        ));
+        assert!(matches!(
+            messages[1],
+            ClientMessage::Break(Credit::ZERO, CreditLimit::ZERO)
+        ));
+        assert!(matches!(
+            messages[2],
+            ClientMessage::Day(Credit::ZERO, CreditLimit::ZERO)
+        ));
+    }
+
+    #[tokio::test]
+    async fn absent_pain_survives_partial_closure_and_exits_after_all_inputs_close() {
+        let (usage, usage_producers) = usage_fixture();
+        let (limit_source, limit_producer) = limit::create(CreditLimitState::default());
+        let limits = limit_source.subscribe_forward();
+        let (mut client_stream, server_stream) = UnixStream::pair().unwrap();
+
+        let client = async move {
+            let mut framed = connect_cli(&mut client_stream).await;
+            let initial = [
+                next_message(&mut framed).await,
+                next_message(&mut framed).await,
+                next_message(&mut framed).await,
+            ];
+            assert_initial_usage(initial);
+
+            usage_producers.rest.update(|_| {}).unwrap();
+            assert!(timeout(NO_MESSAGE_TIMEOUT, framed.next()).await.is_err());
+
+            limit_producer.update(|state| state.rest = CreditLimit::new(12.0));
+            assert!(matches!(
+                next_message(&mut framed).await,
+                ClientMessage::Rest(Credit::ZERO, limit) if limit == CreditLimit::new(12.0)
+            ));
+
+            drop(limit_producer);
+            assert!(timeout(NO_MESSAGE_TIMEOUT, framed.next()).await.is_err());
+
+            drop(usage_producers);
+            assert!(framed.next().await.is_none());
+        };
+
+        timeout(
+            TEST_TIMEOUT,
+            join(handle_listener(server_stream, usage, None, limits), client),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_pain_preserves_initial_order_and_full_map_updates() {
+        let (usage, _usage_producers) = usage_fixture();
+        let (limit_source, limit_producer): (_, CreditLimitProducer) =
+            limit::create(CreditLimitState::default());
+        let limits = limit_source.subscribe_forward();
+
+        let mut labels = PainLabelStore::new();
+        let left = labels.get_or_intern("left");
+        let right = labels.get_or_intern("right");
+        let catalog = pain::build_catalog(labels.finalize(), &[]);
+        let (_committed, live_source, pain_producer, driver) =
+            pain::create(catalog, PainState::default());
+        pain_producer.set(left, 0.25).unwrap();
+        pain_producer.set(right, 0.5).unwrap();
+        let pain = live_source.subscribe_forward();
+        let (mut client_stream, server_stream) = UnixStream::pair().unwrap();
+
+        let client = async move {
+            let mut framed = connect_cli(&mut client_stream).await;
+            let initial = [
+                next_message(&mut framed).await,
+                next_message(&mut framed).await,
+                next_message(&mut framed).await,
+            ];
+            assert_initial_usage(initial);
+            assert!(matches!(
+                next_message(&mut framed).await,
+                ClientMessage::Pain { label, ratio }
+                    if label.as_str() == "left" && ratio == 0.25
+            ));
+            assert!(matches!(
+                next_message(&mut framed).await,
+                ClientMessage::Pain { label, ratio }
+                    if label.as_str() == "right" && ratio == 0.5
+            ));
+
+            pain_producer.set(left, 0.75).unwrap();
+            assert!(matches!(
+                next_message(&mut framed).await,
+                ClientMessage::Pain { label, ratio }
+                    if label.as_str() == "left" && ratio == 0.75
+            ));
+            assert!(matches!(
+                next_message(&mut framed).await,
+                ClientMessage::Pain { label, ratio }
+                    if label.as_str() == "right" && ratio == 0.5
+            ));
+
+            drop(pain_producer);
+
+            limit_producer.update(|state| state.rest = CreditLimit::new(9.0));
+            assert!(matches!(
+                next_message(&mut framed).await,
+                ClientMessage::Rest(Credit::ZERO, limit) if limit == CreditLimit::new(9.0)
+            ));
+            limit_producer.update(|state| state.rest = CreditLimit::new(9.0));
+            assert!(timeout(NO_MESSAGE_TIMEOUT, framed.next()).await.is_err());
+
+            drop(framed);
+        };
+
+        let (_, driver_result, ()) = timeout(
+            TEST_TIMEOUT,
+            join3(
+                handle_listener(server_stream, usage, Some(pain), limits),
+                driver,
+                client,
+            ),
+        )
+        .await
+        .unwrap();
+        driver_result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn socket_closure_ends_listener_while_application_inputs_are_open() {
+        let (usage, _usage_producers) = usage_fixture();
+        let (limit_source, _limit_producer) = limit::create(CreditLimitState::default());
+        let limits = limit_source.subscribe_forward();
+        let (mut client_stream, server_stream) = UnixStream::pair().unwrap();
+
+        let client = async move {
+            let mut framed = connect_cli(&mut client_stream).await;
+            for _ in 0..3 {
+                let _ = next_message(&mut framed).await;
+            }
+            drop(framed);
+        };
+
+        timeout(
+            TEST_TIMEOUT,
+            join(handle_listener(server_stream, usage, None, limits), client),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn outbound_snapshot_compares_complete_pairs_in_protocol_order() {
+        let previous = OutboundSnapshot {
+            rest: (Credit::new(1.0), CreditLimit::new(10.0)),
+            breaks: (Credit::new(2.0), CreditLimit::new(20.0)),
+            day: (Credit::new(3.0), CreditLimit::new(30.0)),
+        };
+        let current = OutboundSnapshot {
+            rest: (Credit::new(4.0), CreditLimit::new(10.0)),
+            breaks: (Credit::new(2.0), CreditLimit::new(25.0)),
+            day: previous.day,
+        };
+
+        let messages = current.messages_since(Some(previous));
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(messages[0], ClientMessage::Rest(_, _)));
+        assert!(matches!(messages[1], ClientMessage::Break(_, _)));
+        assert!(current.messages_since(Some(current)).is_empty());
+    }
 }

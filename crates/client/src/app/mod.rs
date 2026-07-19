@@ -92,7 +92,10 @@ pub async fn run(
     let activity_runtime = activity_module.start(usage_runtime.sources().all().subscribe_forward());
 
     // pain tracking
-    let (pain_source, pain_live_source, pain_producer, pain_task) = pain_module.start(initial_pain);
+    let modules::pain::PainRuntime {
+        source: pain_source,
+        active: active_pain,
+    } = pain_module.start(initial_pain);
     let pain_check_task = pain_check_module
         .zip(pain_check_bindings)
         .map(|(module, bindings)| {
@@ -105,16 +108,16 @@ pub async fn run(
         });
 
     // integrations
-    let (pain_forwarder_task, _pain_producer_keepalive) = if pain_sources.is_empty() {
-        (None, Some(pain_producer))
-    } else {
-        (
+    let (pain_live_source, pain_task, pain_forwarder_task) = match active_pain {
+        Some(active) => (
+            Some(active.live_source),
+            Some(active.driver_task),
             Some(modules::pain_integration::start(
                 pain_sources,
-                pain_producer,
+                active.producer,
             )),
-            None,
-        )
+        ),
+        None => (None, None, None),
     };
     let sink_forwarder_task = credit_sinks.any().then(|| {
         modules::utilization_integration::start(
@@ -198,7 +201,9 @@ pub async fn run(
     transform_tasks.extend(usage_tasks);
     transform_tasks.push(credit_tasks.utilization);
     transform_tasks.push(activity_runtime.detach());
-    transform_tasks.push(pain_task);
+    if let Some(task) = pain_task {
+        transform_tasks.push(task);
+    }
     if let Some(task) = pain_forwarder_task {
         transform_tasks.push(task);
     }
