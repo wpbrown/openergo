@@ -17,6 +17,8 @@ keyboard and mouse use.
 
 Alpha. Code is available for technical preview and early testers.
 
+I run from `master` on NixOS with X11/i3 currently.
+
 ## Features
 
 - **Dwell clicking** reduces physical clicks by clicking when the pointer rests
